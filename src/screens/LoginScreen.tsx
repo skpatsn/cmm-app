@@ -13,6 +13,7 @@ import {
   Platform,
   Keyboard,
   TouchableWithoutFeedback,
+  Pressable,
 } from "react-native";
 import { AuthContext } from "../contexts/AuthContext";
 import { loginUser } from "../services/authService";
@@ -45,8 +46,9 @@ export default function LoginScreen() {
 
       if (data?.token) {
         // ✅ Save user in AuthContext (handles AsyncStorage)
-        await login(data.token, role, data.username ?? username);
-
+        // await login(data.token, role, data.username ?? username);
+        await login(data.token, role, data.username ?? username, data.refreshToken);
+        // replace("Dashboard");
         // ✅ Navigate to Dashboard safely
         replace("Dashboard");
       } else {
@@ -65,8 +67,9 @@ export default function LoginScreen() {
       style={styles.container}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={styles.innerContainer}>
+      <Pressable onPress={handleLogin} style={{ pointerEvents: 'auto' }}>
+      
+          <View style={styles.innerContainer}>
           <Text style={styles.title}>CMM System Login</Text>
 
           <TextInput
@@ -109,7 +112,8 @@ export default function LoginScreen() {
 
           <Text style={styles.footerText}>© 2025 CMM System</Text>
         </View>
-      </TouchableWithoutFeedback>
+       </Pressable>
+      {/* </TouchableWithoutFeedback> */}
     </KeyboardAvoidingView>
   );
 }

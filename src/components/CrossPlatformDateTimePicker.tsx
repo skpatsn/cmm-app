@@ -12,7 +12,8 @@ import DateTimePicker, {
 interface Props {
   label: string;
   value: Date;
-  mode: "date" | "time"; //  added this type
+  mode: "date" | "time"; 
+  disabled?: boolean;
   onChange: (date: Date) => void;
 }
 

@@ -2,9 +2,7 @@
 // This file implements a grouped stepper form (fields grouped into logical sections). 
 // It enforces the no-backdate rule and required fields, calculates travel cost from distance and per-km rate, and saves the meeting locally with a pending HO approval state.
 
-// // src/screens/MeetingFormScreen.tsx
-
-
+// // // src/screens/MeetingFormScreen.tsx
 
 
 import React, { useState, useContext, useEffect } from "react";
@@ -22,8 +20,31 @@ import { AuthContext } from "../contexts/AuthContext";
 import CrossPlatformDateTimePicker from "../components/CrossPlatformDateTimePicker";
 import api from "../api/axiosConfig";
 
+type MeetingStatus = "draft" | "pending" | "approved" | "rejected" | "completed";
+
+type Meeting = {
+  id: number;
+  client_name: string;
+  contact_person: string;
+  designation: string;
+  email: string;
+  contact_number: string;
+  location: string;
+  meeting_purpose: string;
+  discussion_summary?: string;
+  visit_place?: string;
+  path_of_travel?: string;
+  distance_km?: number;
+  expenses?: number;
+  remarks?: string;
+  start_time?: string;
+  end_time?: string;
+  status: "draft" | "pending" | "approved" | "rejected" | "completed";
+  [key: string]: any; // fallback for any extra fields
+};
+
 export default function MeetingFormScreen({ navigation, route }: any) {
-  const { token, logout, userLocation } = useContext(AuthContext);
+  const { token, logout, userLocation, user } = useContext(AuthContext);
 
   const editingMeeting = route.params?.meeting || null;
   const onSuccess = route.params?.onSuccess || null;
@@ -44,6 +65,7 @@ export default function MeetingFormScreen({ navigation, route }: any) {
   const [distanceKm, setDistanceKm] = useState(editingMeeting?.distance_km?.toString() || "0");
   const [expenses, setExpenses] = useState(editingMeeting?.expenses?.toString() || "0");
   const [remarks, setRemarks] = useState(editingMeeting?.remarks || "");
+  const [status, setStatus] = useState<MeetingStatus>(editingMeeting?.status || "draft");
 
   const [meetingDate, setMeetingDate] = useState<Date>(
     editingMeeting ? new Date(editingMeeting.meeting_date) : new Date()
@@ -70,18 +92,24 @@ export default function MeetingFormScreen({ navigation, route }: any) {
     Walk: 0,
   };
 
+  // ---------- Derived UI rules ----------
+  const isNew = !editingMeeting;
+  const canSeeAdvanced = status === "approved";
+  const canEditAll = canSeeAdvanced;
+  const canSubmitForApproval = isNew || (editingMeeting && status === "draft");
+
   // ---------- AUTO CALC EXPENSE ----------
   useEffect(() => {
-    if (!editingMeeting || editingMeeting.status !== "completed") {
+    if (canEditAll) {
       const km = Number(distanceKm) || 0;
       const rate = RATE_PER_KM[pathOfTravel] || 0;
       setExpenses((km * rate).toFixed(2));
     }
   }, [distanceKm, pathOfTravel]);
 
-  // ---------- LOAD MEETING (EDIT MODE) ----------
+  // ---------- LOAD MEETING (EDIT MODE OR via meetingId) ----------
   useEffect(() => {
-    if (route.params?.meetingId) {
+    if (route.params?.meetingId && !editingMeeting) {
       (async () => {
         try {
           setLoading(true);
@@ -105,6 +133,7 @@ export default function MeetingFormScreen({ navigation, route }: any) {
           setMeetingDate(m.meeting_date ? new Date(m.meeting_date) : new Date());
           setStartTime(m.start_time ? new Date(`1970-01-01T${m.start_time}`) : new Date());
           setEndTime(m.end_time ? new Date(`1970-01-01T${m.end_time}`) : new Date(new Date().getTime() + 30 * 60000));
+          setStatus(m.status || "draft");
         } catch (err) {
           Alert.alert("Error", "Failed to load meeting details.");
           navigation.goBack();
@@ -115,8 +144,17 @@ export default function MeetingFormScreen({ navigation, route }: any) {
     }
   }, [route.params?.meetingId]);
 
+  // ---------- Helpers ----------
+  const isPastMeeting = () => {
+    const t = new Date();
+    t.setHours(0, 0, 0, 0);
+    const md = new Date(meetingDate);
+    md.setHours(0, 0, 0, 0);
+    return md < t;
+  };
+
   // ---------- VALIDATION ----------
-  const validate = () => {
+  const validateInitial = () => {
     if (!personName.trim()) return "Person name is required.";
     if (!designation.trim()) return "Designation is required.";
     if (!phone.trim()) return "Contact number is required.";
@@ -132,70 +170,116 @@ export default function MeetingFormScreen({ navigation, route }: any) {
     const meetingDay = new Date(meetingDate);
     meetingDay.setHours(0, 0, 0, 0);
     if (meetingDay < today) return "Cannot select a past meeting date.";
-    if (startTime >= endTime) return "Start time must be before end time.";
 
     return null;
+  };
+
+  const validateAdvanced = () => {
+    if (startTime >= endTime) return "Start time must be before end time.";
+    return null;
+  };
+
+  // ---------- NOTIFICATIONS ----------
+  const notifyApprovers = async (meetingData: any) => {
+    try {
+      await api.post(
+        "/notifications/notify/",
+        {
+          roles: ["HO", "MGMT"],
+          title: "Meeting Approval Requested",
+          message: `Approval requested for meeting with ${meetingData.contact_person || meetingData.client_name}`,
+          payload: { meeting_id: meetingData.id },
+        },
+        { headers: { Authorization: `Token ${token}` } }
+      );
+    } catch (err) {
+      console.log("notifyApprovers error:", err?.response?.data || err);
+    }
   };
 
   // ---------- SUBMIT ----------
   const submitMeeting = async () => {
     if (loading) return;
-    const err = validate();
-    if (err) return Alert.alert("Validation Error", err);
+
+    if (!canEditAll) {
+      const err = validateInitial();
+      if (err) return Alert.alert("Validation Error", err);
+    } else {
+      const err = validateInitial() || validateAdvanced();
+      if (err) return Alert.alert("Validation Error", err);
+    }
 
     setLoading(true);
 
-    const payload = {
+    const payload: any = {
       client_name: clientName || null,
       contact_person: personName,
       designation,
       email,
       contact_number: phone,
       location: meetingLocation,
-      visit_place: place,
       meeting_purpose: purpose,
       meeting_date: format(meetingDate, "yyyy-MM-dd"),
-      start_time: format(startTime, "HH:mm:ss"),
-      end_time: format(endTime, "HH:mm:ss"),
-      discussion_summary: discussion,
-      path_of_travel: pathOfTravel,
-      distance_km: parseFloat(distanceKm) || 0,
-      expenses: parseFloat(expenses) || 0,
-      remarks,
     };
 
+    if (canEditAll) {
+      payload.visit_place = place;
+      payload.discussion_summary = discussion;
+      payload.path_of_travel = pathOfTravel;
+      payload.distance_km = parseFloat(distanceKm) || 0;
+      payload.expenses = parseFloat(expenses) || 0;
+      payload.remarks = remarks;
+      payload.start_time = format(startTime, "HH:mm:ss");
+      payload.end_time = format(endTime, "HH:mm:ss");
+      payload.status = status || "approved";
+    } else {
+      payload.status = "pending";
+    }
+
     try {
-      const headers = {
-        "Content-Type": "application/json",
-        Authorization: `Token ${token}`,
-      };
+      const headers = { "Content-Type": "application/json", Authorization: `Token ${token}` };
 
       const res = editingMeeting
-        ? await api.put(`/meetings/${editingMeeting.id}/`, payload, { headers })
-        : await api.post("/meetings/create/", payload, { headers });
+          ? await api.put(`/meetings/${editingMeeting.id}/`, payload, { headers })
+          : await api.post("/meetings/", payload, { headers });
 
-      Alert.alert("Success", editingMeeting ? "Meeting updated successfully!" : "Meeting created successfully!");
+      const created = res.data;
 
-      // ✅ Notify dashboard and navigate back
+      if (!editingMeeting && created.id && created.status === "pending") {
+        await notifyApprovers(created);
+      }
+
+      Alert.alert(
+        "Success",
+        editingMeeting ? "Meeting updated successfully!" : "Meeting submitted for approval!"
+      );
+
+      setStatus(created.status || payload.status);
+
       if (onSuccess) onSuccess(res.data);
       navigation.navigate("Dashboard", { refresh: true });
 
-      // ✅ Reset form (only for create)
-      if (!editingMeeting) {
-        resetForm();
-      }
+      if (!editingMeeting) resetForm();
     } catch (error: any) {
-      console.log("Submit error:", error.response?.data);
+      // console.log("Submit error:", error.response?.data
+      console.log("Submit error:", error.response?.data || error);
       const msg =
         error?.response?.data?.detail ||
-        Object.values(error?.response?.data || {}).flat().join("\n") ||
+        (error?.response?.data ? Object.values(error.response.data).flat().join("\n") : null) ||
         "Network error";
       Alert.alert("Error", msg);
 
-      if (error.response?.status === 401) {
-        await logout();
-        navigation.replace("Login");
-      }
+      // Handle 401 Unauthorized by logging out
+      // if (error.response?.status === 401) {
+      //   await logout();
+      //   navigation.replace("Login");
+      // }
+      // ✅ Prevent forced logout on temporary 401
+    if (error.response?.status === 401) {
+      console.warn("Unauthorized! Token may be expired — stay on screen.");
+        // We no longer auto-logout; user can continue editing or retry
+        return;
+    }
     } finally {
       setLoading(false);
     }
@@ -218,6 +302,7 @@ export default function MeetingFormScreen({ navigation, route }: any) {
     setMeetingDate(new Date());
     setStartTime(new Date());
     setEndTime(new Date(new Date().getTime() + 30 * 60000));
+    setStatus("draft");
   };
 
   // ---------- RENDER ----------
@@ -228,15 +313,24 @@ export default function MeetingFormScreen({ navigation, route }: any) {
     >
       <ScrollView style={styles.container} keyboardShouldPersistTaps="handled">
         <Text variant="headlineMedium" style={styles.title}>
-          {editingMeeting ? "Edit Meeting" : "Schedule Meeting"}
+          {editingMeeting ? (status === "approved" ? "Edit Meeting" : "Meeting Request") : "Schedule Meeting"}
         </Text>
 
+        {/* Status / Info */}
+        {editingMeeting && (
+          <Text style={{ textAlign: "center", marginBottom: 8 }}>
+            Status: {status.toUpperCase()} {isPastMeeting() ? " • Past meeting (history)" : ""}
+          </Text>
+        )}
+
+        {/* ---------- FIRST SET (Approval request set) ---------- */}
         <TextInput
           label="User Location (default)"
           value={meetingLocation}
           onChangeText={setMeetingLocation}
           style={styles.input}
           right={<TextInput.Icon icon="pencil" />}
+          editable={!editingMeeting || (editingMeeting && status === "draft")}
         />
 
         <CrossPlatformDateTimePicker
@@ -244,40 +338,29 @@ export default function MeetingFormScreen({ navigation, route }: any) {
           value={meetingDate}
           onChange={setMeetingDate}
           mode="date"
+          disabled={!!(editingMeeting && status !== "draft")}
         />
-
-        <View style={styles.row}>
-          <CrossPlatformDateTimePicker
-            label="Start Time"
-            value={startTime}
-            onChange={setStartTime}
-            mode="time"
-          />
-          <CrossPlatformDateTimePicker
-            label="End Time"
-            value={endTime}
-            onChange={setEndTime}
-            mode="time"
-          />
-        </View>
 
         <TextInput
           label="Client / Organization"
           value={clientName}
           onChangeText={setClientName}
           style={styles.input}
+          editable={!editingMeeting || (editingMeeting && status === "draft")}
         />
         <TextInput
           label="Person to meet *"
           value={personName}
           onChangeText={setPersonName}
           style={styles.input}
+          editable={!editingMeeting || (editingMeeting && status === "draft")}
         />
         <TextInput
           label="Designation *"
           value={designation}
           onChangeText={setDesignation}
           style={styles.input}
+          editable={!editingMeeting || (editingMeeting && status === "draft")}
         />
         <TextInput
           label="Email ID"
@@ -285,6 +368,7 @@ export default function MeetingFormScreen({ navigation, route }: any) {
           onChangeText={setEmail}
           keyboardType="email-address"
           style={styles.input}
+          editable={!editingMeeting || (editingMeeting && status === "draft")}
         />
         <TextInput
           label="Contact Number *"
@@ -292,82 +376,111 @@ export default function MeetingFormScreen({ navigation, route }: any) {
           onChangeText={setPhone}
           keyboardType="phone-pad"
           style={styles.input}
+          editable={!editingMeeting || (editingMeeting && status === "draft")}
         />
-
-        {/* Visit Place Menu */}
-        <Menu
-          visible={placeMenuVisible}
-          onDismiss={() => setPlaceMenuVisible(false)}
-          anchor={
-            <Button mode="outlined" onPress={() => setPlaceMenuVisible(true)} style={styles.input}>
-              Visit Place: {place}
-            </Button>
-          }
-        >
-          {["Office", "Client Site", "Other"].map((p) => (
-            <Menu.Item
-              key={p}
-              title={p}
-              onPress={() => {
-                setPlace(p);
-                setPlaceMenuVisible(false);
-              }}
-            />
-          ))}
-        </Menu>
 
         <TextInput
           label="Meeting Purpose *"
           value={purpose}
           onChangeText={setPurpose}
           style={styles.input}
-        />
-        <TextInput
-          label="Discussion / Outcome"
-          value={discussion}
-          onChangeText={setDiscussion}
-          multiline
-          style={styles.input}
+          editable={!editingMeeting || (editingMeeting && status === "draft")}
         />
 
-        {/* Travel Menu */}
-        <Menu
-          visible={travelMenuVisible}
-          onDismiss={() => setTravelMenuVisible(false)}
-          anchor={
-            <Button mode="outlined" onPress={() => setTravelMenuVisible(true)} style={styles.input}>
-              Path of Travel: {pathOfTravel}
-            </Button>
-          }
-        >
-          {["Car", "Bike", "Cab", "Public Transport", "Walk"].map((t) => (
-            <Menu.Item
-              key={t}
-              title={t}
-              onPress={() => {
-                setPathOfTravel(t);
-                setTravelMenuVisible(false);
-              }}
+        {/* ---------- ADVANCED FIELDS — VISIBLE ONLY WHEN APPROVED ---------- */}
+        {!canSeeAdvanced ? (
+          <Text style={{ marginVertical: 8, fontStyle: "italic", textAlign: "center" }}>
+            Additional meeting details will be available after approval.
+          </Text>
+        ) : (
+          <>
+            <TextInput
+              label="Discussion / Outcome"
+              value={discussion}
+              onChangeText={setDiscussion}
+              multiline
+              style={styles.input}
             />
-          ))}
-        </Menu>
 
-        <TextInput
-          label="Distance (km)"
-          value={distanceKm}
-          onChangeText={(v) => setDistanceKm(v.replace(/[^0-9.]/g, ""))}
-          keyboardType="numeric"
-          style={styles.input}
-        />
-        <TextInput label="Expenses (₹)" value={expenses} editable={false} style={styles.input} />
-        <TextInput
-          label="Remarks / Feedback"
-          value={remarks}
-          onChangeText={setRemarks}
-          multiline
-          style={styles.input}
-        />
+            {/* Visit Place Menu */}
+            <Menu
+              visible={placeMenuVisible}
+              onDismiss={() => setPlaceMenuVisible(false)}
+              anchor={
+                <Button mode="outlined" onPress={() => setPlaceMenuVisible(true)} style={styles.input}>
+                  Visit Place: {place}
+                </Button>
+              }
+            >
+              {["Office", "Client Site", "Other"].map((p) => (
+                <Menu.Item
+                  key={p}
+                  title={p}
+                  onPress={() => {
+                    setPlace(p);
+                    setPlaceMenuVisible(false);
+                  }}
+                />
+              ))}
+            </Menu>
 
+            {/* Times */}
+            <View style={styles.row}>
+              <CrossPlatformDateTimePicker
+                label="Start Time"
+                value={startTime}
+                onChange={setStartTime}
+                mode="time"
+              />
+              <CrossPlatformDateTimePicker
+                label="End Time"
+                value={endTime}
+                onChange={setEndTime}
+                mode="time"
+              />
+            </View>
+
+            {/* Travel Menu */}
+            <Menu
+              visible={travelMenuVisible}
+              onDismiss={() => setTravelMenuVisible(false)}
+              anchor={
+                <Button mode="outlined" onPress={() => setTravelMenuVisible(true)} style={styles.input}>
+                  Path of Travel: {pathOfTravel}
+                </Button>
+              }
+            >
+              {["Car", "Bike", "Cab", "Public Transport", "Walk"].map((t) => (
+                <Menu.Item
+                  key={t}
+                  title={t}
+                  onPress={() => {
+                    setPathOfTravel(t);
+                    setTravelMenuVisible(false);
+                  }}
+                />
+              ))}
+            </Menu>
+
+            <TextInput
+              label="Distance (km)"
+              value={distanceKm}
+              onChangeText={(v) => setDistanceKm(v.replace(/[^0-9.]/g, ""))}
+              keyboardType="numeric"
+              style={styles.input}
+            />
+            <TextInput label="Expenses (₹)" value={expenses} editable={false} style={styles.input} />
+            <TextInput
+              label="Remarks / Feedback"
+              value={remarks}
+              onChangeText={setRemarks}
+              multiline
+              style={styles.input}
+            />
+          </>
+        )}
+
+        {/* Submit Button */}
         <Button
           mode="contained"
           loading={loading}
@@ -375,20 +488,922 @@ export default function MeetingFormScreen({ navigation, route }: any) {
           disabled={loading}
           style={styles.submitButton}
         >
-          {editingMeeting ? "Update Meeting" : "Submit for Approval"}
+          {editingMeeting
+            ? editingMeeting.status === "pending"
+              ? "Update Request (Pending Approval)"
+              : "Update Meeting"
+            : "Submit for Approval"}
         </Button>
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
+// ---------- STYLES ----------
 const styles = StyleSheet.create({
   container: { padding: 16 },
   title: { marginBottom: 12, fontWeight: "700", textAlign: "center" },
   row: { flexDirection: "row", justifyContent: "space-between", marginBottom: 12 },
   input: { marginBottom: 10 },
   submitButton: { marginTop: 12, paddingVertical: 6 },
+  sectionHeader: { fontSize: 16, fontWeight: "600", marginVertical: 10, color: "#333" },
 });
+
+
+
+
+// src/screens/MeetingFormScreen.tsx
+// import React, { useState, useContext, useEffect } from "react";
+// import {
+//   ScrollView,
+//   Alert,
+//   View,
+//   StyleSheet,
+//   KeyboardAvoidingView,
+//   Platform,
+// } from "react-native";
+// import { TextInput, Button, Text, Menu } from "react-native-paper";
+// import { format } from "date-fns";
+// import { AuthContext } from "../contexts/AuthContext";
+// import CrossPlatformDateTimePicker from "../components/CrossPlatformDateTimePicker";
+// import api from "../api/axiosConfig";
+
+// type MeetingStatus = "draft" | "pending" | "approved" | "rejected" | "completed";
+
+// export default function MeetingFormScreen({ navigation, route }: any) {
+//   const { token, logout, userLocation, user } = useContext(AuthContext);
+
+//   const editingMeeting = route.params?.meeting || null;
+//   const onSuccess = route.params?.onSuccess || null;
+
+//   const [loading, setLoading] = useState(false);
+
+//   // ---------- FORM STATES ----------
+//   const [clientName, setClientName] = useState(editingMeeting?.client_name || "");
+//   const [personName, setPersonName] = useState(editingMeeting?.contact_person || "");
+//   const [designation, setDesignation] = useState(editingMeeting?.designation || "");
+//   const [email, setEmail] = useState(editingMeeting?.email || "");
+//   const [phone, setPhone] = useState(editingMeeting?.contact_number || "");
+//   const [meetingLocation, setMeetingLocation] = useState(editingMeeting?.location || userLocation || "");
+//   const [place, setPlace] = useState(editingMeeting?.visit_place || "Office");
+//   const [purpose, setPurpose] = useState(editingMeeting?.meeting_purpose || "");
+//   const [discussion, setDiscussion] = useState(editingMeeting?.discussion_summary || "");
+//   const [pathOfTravel, setPathOfTravel] = useState(editingMeeting?.path_of_travel || "Car");
+//   const [distanceKm, setDistanceKm] = useState(editingMeeting?.distance_km?.toString() || "0");
+//   const [expenses, setExpenses] = useState(editingMeeting?.expenses?.toString() || "0");
+//   const [remarks, setRemarks] = useState(editingMeeting?.remarks || "");
+//   const [status, setStatus] = useState<MeetingStatus>(editingMeeting?.status || "draft");
+
+//   const [meetingDate, setMeetingDate] = useState<Date>(
+//     editingMeeting ? new Date(editingMeeting.meeting_date) : new Date()
+//   );
+//   const [startTime, setStartTime] = useState<Date>(
+//     editingMeeting?.start_time
+//       ? new Date(`1970-01-01T${editingMeeting.start_time}`)
+//       : new Date()
+//   );
+//   const [endTime, setEndTime] = useState<Date>(
+//     editingMeeting?.end_time
+//       ? new Date(`1970-01-01T${editingMeeting.end_time}`)
+//       : new Date(new Date().getTime() + 30 * 60000)
+//   );
+
+//   const [placeMenuVisible, setPlaceMenuVisible] = useState(false);
+//   const [travelMenuVisible, setTravelMenuVisible] = useState(false);
+
+//   const RATE_PER_KM: Record<string, number> = {
+//     Car: 10,
+//     Bike: 5,
+//     Cab: 15,
+//     "Public Transport": 3,
+//     Walk: 0,
+//   };
+
+//   // ---------- Derived UI rules ----------
+//   // When creating a meeting (no editingMeeting) we show ONLY the first approval fields.
+//   // After creation, status becomes "pending" and HO/managers will approve/reject.
+//   // Only when status === "approved" the "advanced" fields become visible/editable.
+//   const isNew = !editingMeeting;
+//   const canSeeAdvanced = status === "approved";
+//   const canEditAll = canSeeAdvanced;
+//   const canSubmitForApproval = isNew || (editingMeeting && status === "draft");
+
+//   // ---------- AUTO CALC EXPENSE ----------
+//   useEffect(() => {
+//     // only auto-calc when not locked (i.e., after approve user can update these fields)
+//     if (canEditAll) {
+//       const km = Number(distanceKm) || 0;
+//       const rate = RATE_PER_KM[pathOfTravel] || 0;
+//       setExpenses((km * rate).toFixed(2));
+//     }
+//   }, [distanceKm, pathOfTravel]);
+
+//   // ---------- LOAD MEETING (EDIT MODE OR via meetingId) ----------
+//   useEffect(() => {
+//     if (route.params?.meetingId && !editingMeeting) {
+//       (async () => {
+//         try {
+//           setLoading(true);
+//           const res = await api.get(`/meetings/${route.params.meetingId}/`, {
+//             headers: { Authorization: `Token ${token}` },
+//           });
+//           const m = res.data;
+//           setClientName(m.client_name || "");
+//           setPersonName(m.contact_person || "");
+//           setDesignation(m.designation || "");
+//           setEmail(m.email || "");
+//           setPhone(m.contact_number || "");
+//           setMeetingLocation(m.location || userLocation || "");
+//           setPlace(m.visit_place || "Office");
+//           setPurpose(m.meeting_purpose || "");
+//           setDiscussion(m.discussion_summary || "");
+//           setPathOfTravel(m.path_of_travel || "Car");
+//           setDistanceKm(m.distance_km?.toString() || "0");
+//           setExpenses(m.expenses?.toString() || "0");
+//           setRemarks(m.remarks || "");
+//           setMeetingDate(m.meeting_date ? new Date(m.meeting_date) : new Date());
+//           setStartTime(m.start_time ? new Date(`1970-01-01T${m.start_time}`) : new Date());
+//           setEndTime(m.end_time ? new Date(`1970-01-01T${m.end_time}`) : new Date(new Date().getTime() + 30 * 60000));
+//           setStatus(m.status || "draft");
+//         } catch (err) {
+//           Alert.alert("Error", "Failed to load meeting details.");
+//           navigation.goBack();
+//         } finally {
+//           setLoading(false);
+//         }
+//       })();
+//     }
+//   }, [route.params?.meetingId]);
+
+//   // ---------- Helpers ----------
+//   const isPastMeeting = () => {
+//     const t = new Date();
+//     t.setHours(0, 0, 0, 0);
+//     const md = new Date(meetingDate);
+//     md.setHours(0, 0, 0, 0);
+//     return md < t;
+//   };
+
+//   // ---------- VALIDATION ----------
+//   const validateInitial = () => {
+//     // validation for the first approval set only
+//     if (!personName.trim()) return "Person name is required.";
+//     if (!designation.trim()) return "Designation is required.";
+//     if (!phone.trim()) return "Contact number is required.";
+//     if (!purpose.trim()) return "Meeting purpose is required.";
+//     if (!meetingLocation.trim()) return "Meeting location is required.";
+//     if (!email.trim()) return "Email is required.";
+
+//     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+//     if (!emailRegex.test(email)) return "Invalid email format.";
+
+//     const today = new Date();
+//     today.setHours(0, 0, 0, 0);
+//     const meetingDay = new Date(meetingDate);
+//     meetingDay.setHours(0, 0, 0, 0);
+//     if (meetingDay < today) return "Cannot select a past meeting date.";
+
+//     return null;
+//   };
+
+//   const validateAdvanced = () => {
+//     // validation for advanced fields (once visible)
+//     if (startTime >= endTime) return "Start time must be before end time.";
+//     return null;
+//   };
+
+//   // ---------- NOTIFICATIONS helper ----------
+//   // This calls a backend endpoint to create/send notifications.
+//   // Backend must implement /notifications/notify/ to accept { recipients: [...], title, message, payload }
+//   const notifyApprovers = async (meetingData: any) => {
+//     try {
+//       await api.post(
+//         "/notifications/notify/",
+//         {
+//           // server: decide recipients by role filter ("HO","manager") OR accept explicit recipient ids
+//           roles: ["HO", "Manager"],
+//           title: "Meeting Approval Requested",
+//           message: `Approval requested for meeting with ${meetingData.contact_person || meetingData.client_name}`,
+//           payload: { meeting_id: meetingData.id },
+//         },
+//         { headers: { Authorization: `Token ${token}` } }
+//       );
+//     } catch (err) {
+//       // non-fatal if notify fails — still proceed, but log
+//       console.log("notifyApprovers error:", err?.response?.data || err);
+//     }
+//   };
+
+//   // ---------- SUBMIT ----------
+//   const submitMeeting = async () => {
+//     if (loading) return;
+
+//     // If creating / submitting for approval => validate initial set only.
+//     if (!canEditAll) {
+//       const err = validateInitial();
+//       if (err) return Alert.alert("Validation Error", err);
+//     } else {
+//       // if editing after approval, validate advanced fields too
+//       const err = validateInitial() || validateAdvanced();
+//       if (err) return Alert.alert("Validation Error", err);
+//     }
+
+//     setLoading(true);
+
+//     const payload: any = {
+//       client_name: clientName || null,
+//       contact_person: personName,
+//       designation,
+//       email,
+//       contact_number: phone,
+//       location: meetingLocation,
+//       meeting_purpose: purpose,
+//       meeting_date: format(meetingDate, "yyyy-MM-dd"),
+//       // advanced fields only send if allowed / present
+//     };
+
+//     if (canEditAll) {
+//       payload.visit_place = place;
+//       payload.discussion_summary = discussion;
+//       payload.path_of_travel = pathOfTravel;
+//       payload.distance_km = parseFloat(distanceKm) || 0;
+//       payload.expenses = parseFloat(expenses) || 0;
+//       payload.remarks = remarks;
+//       payload.start_time = format(startTime, "HH:mm:ss");
+//       payload.end_time = format(endTime, "HH:mm:ss");
+//       // keep status if already set
+//       payload.status = status || "approved";
+//     } else {
+//       // when submitting the initial request, set status to pending
+//       payload.status = "pending";
+//     }
+
+//     try {
+//       const headers = {
+//         "Content-Type": "application/json",
+//         Authorization: `Token ${token}`,
+//       };
+
+//       const res = editingMeeting
+//         ? await api.put(`/meetings/${editingMeeting.id}/`, payload, { headers })
+//         : await api.post("/meetings/create/", payload, { headers });
+
+//       const created = res.data;
+
+//       // Notify approvers only when a new pending request is created
+//       if (!editingMeeting && created.id && created.status === "pending") {
+//         await notifyApprovers(created);
+//       }
+
+//       Alert.alert("Success", editingMeeting ? "Meeting updated successfully!" : "Meeting submitted for approval!");
+
+//       // Update local status if created or updated so UI can reflect new state
+//       setStatus(created.status || payload.status);
+
+//       if (onSuccess) onSuccess(res.data);
+//       navigation.navigate("Dashboard", { refresh: true });
+
+//       if (!editingMeeting) resetForm();
+//     } catch (error: any) {
+//       console.log("Submit error:", error.response?.data || error);
+//       const msg =
+//         error?.response?.data?.detail ||
+//         (error?.response?.data ? Object.values(error.response.data).flat().join("\n") : null) ||
+//         "Network error";
+//       Alert.alert("Error", msg);
+
+//       if (error.response?.status === 401) {
+//         await logout();
+//         navigation.replace("Login");
+//       }
+//     } finally {
+//       setLoading(false);
+//     }
+//   };
+
+//   const resetForm = () => {
+//     setClientName("");
+//     setPersonName("");
+//     setDesignation("");
+//     setEmail("");
+//     setPhone("");
+//     setMeetingLocation(userLocation || "");
+//     setPlace("Office");
+//     setPurpose("");
+//     setDiscussion("");
+//     setPathOfTravel("Car");
+//     setDistanceKm("0");
+//     setExpenses("0");
+//     setRemarks("");
+//     setMeetingDate(new Date());
+//     setStartTime(new Date());
+//     setEndTime(new Date(new Date().getTime() + 30 * 60000));
+//     setStatus("draft");
+//   };
+
+//   // ---------- RENDER ----------
+//   return (
+//     <KeyboardAvoidingView
+//       style={{ flex: 1, backgroundColor: "#fff" }}
+//       behavior={Platform.OS === "ios" ? "padding" : undefined}
+//     >
+//       <ScrollView style={styles.container} keyboardShouldPersistTaps="handled">
+//         <Text variant="headlineMedium" style={styles.title}>
+//           {editingMeeting ? (status === "approved" ? "Edit Meeting" : "Meeting Request") : "Schedule Meeting"}
+//         </Text>
+
+//         {/* Status / Info */}
+//         {editingMeeting && (
+//           <Text style={{ textAlign: "center", marginBottom: 8 }}>
+//             Status: {status.toUpperCase()} {isPastMeeting() ? " • Past meeting (history)" : ""}
+//           </Text>
+//         )}
+
+//         {/* ---------- FIRST SET (Approval request set) ---------- */}
+//         <TextInput
+//           label="User Location (default)"
+//           value={meetingLocation}
+//           onChangeText={setMeetingLocation}
+//           style={styles.input}
+//           right={<TextInput.Icon icon="pencil" />}
+//           editable={!editingMeeting || (editingMeeting && status === "draft")}
+//         />
+
+//         <CrossPlatformDateTimePicker
+//           label="Meeting Date"
+//           value={meetingDate}
+//           onChange={setMeetingDate}
+//           mode="date"
+//           disabled={!!(editingMeeting && status !== "draft")}
+//         />
+
+//         <TextInput
+//           label="Client / Organization"
+//           value={clientName}
+//           onChangeText={setClientName}
+//           style={styles.input}
+//           editable={!editingMeeting || (editingMeeting && status === "draft")}
+//         />
+//         <TextInput
+//           label="Person to meet *"
+//           value={personName}
+//           onChangeText={setPersonName}
+//           style={styles.input}
+//           editable={!editingMeeting || (editingMeeting && status === "draft")}
+//         />
+//         <TextInput
+//           label="Designation *"
+//           value={designation}
+//           onChangeText={setDesignation}
+//           style={styles.input}
+//           editable={!editingMeeting || (editingMeeting && status === "draft")}
+//         />
+//         <TextInput
+//           label="Email ID"
+//           value={email}
+//           onChangeText={setEmail}
+//           keyboardType="email-address"
+//           style={styles.input}
+//           editable={!editingMeeting || (editingMeeting && status === "draft")}
+//         />
+//         <TextInput
+//           label="Contact Number *"
+//           value={phone}
+//           onChangeText={setPhone}
+//           keyboardType="phone-pad"
+//           style={styles.input}
+//           editable={!editingMeeting || (editingMeeting && status === "draft")}
+//         />
+
+//         <TextInput
+//           label="Meeting Purpose *"
+//           value={purpose}
+//           onChangeText={setPurpose}
+//           style={styles.input}
+//           editable={!editingMeeting || (editingMeeting && status === "draft")}
+//         />
+
+//         {/* ---------- ADVANCED FIELDS — VISIBLE ONLY WHEN APPROVED ---------- */}
+//                 {/* ---------- ADVANCED FIELDS — VISIBLE ONLY WHEN APPROVED ---------- */}
+//         {!canSeeAdvanced ? (
+//           <Text style={{ marginVertical: 8, fontStyle: "italic", textAlign: "center" }}>
+//             Additional meeting details will be available after approval.
+//           </Text>
+//         ) : (
+//           <>
+//             <TextInput
+//               label="Discussion / Outcome"
+//               value={discussion}
+//               onChangeText={setDiscussion}
+//               multiline
+//               style={styles.input}
+//             />
+
+//             {/* Visit Place Menu */}
+//             <Menu
+//               visible={placeMenuVisible}
+//               onDismiss={() => setPlaceMenuVisible(false)}
+//               anchor={
+//                 <Button mode="outlined" onPress={() => setPlaceMenuVisible(true)} style={styles.input}>
+//                   Visit Place: {place}
+//                 </Button>
+//               }
+//             >
+//               {["Office", "Client Site", "Other"].map((p) => (
+//                 <Menu.Item
+//                   key={p}
+//                   title={p}
+//                   onPress={() => {
+//                     setPlace(p);
+//                     setPlaceMenuVisible(false);
+//                   }}
+//                 />
+//               ))}
+//             </Menu>
+
+//             {/* Times */}
+//             <View style={styles.row}>
+//               <CrossPlatformDateTimePicker
+//                 label="Start Time"
+//                 value={startTime}
+//                 onChange={setStartTime}
+//                 mode="time"
+//               />
+//               <CrossPlatformDateTimePicker
+//                 label="End Time"
+//                 value={endTime}
+//                 onChange={setEndTime}
+//                 mode="time"
+//               />
+//             </View>
+
+//             {/* Travel Menu */}
+//             <Menu
+//               visible={travelMenuVisible}
+//               onDismiss={() => setTravelMenuVisible(false)}
+//               anchor={
+//                 <Button mode="outlined" onPress={() => setTravelMenuVisible(true)} style={styles.input}>
+//                   Path of Travel: {pathOfTravel}
+//                 </Button>
+//               }
+//             >
+//               {["Car", "Bike", "Cab", "Public Transport", "Walk"].map((t) => (
+//                 <Menu.Item
+//                   key={t}
+//                   title={t}
+//                   onPress={() => {
+//                     setPathOfTravel(t);
+//                     setTravelMenuVisible(false);
+//                   }}
+//                 />
+//               ))}
+//             </Menu>
+
+//             <TextInput
+//               label="Distance (km)"
+//               value={distanceKm}
+//               onChangeText={(v) => setDistanceKm(v.replace(/[^0-9.]/g, ""))}
+//               keyboardType="numeric"
+//               style={styles.input}
+//             />
+//             <TextInput label="Expenses (₹)" value={expenses} editable={false} style={styles.input} />
+//             <TextInput
+//               label="Remarks / Feedback"
+//               value={remarks}
+//               onChangeText={setRemarks}
+//               multiline
+//               style={styles.input}
+//             />
+//           </>
+//         )}
+
+//         {/* Submit Button */}
+//         <Button
+//           mode="contained"
+//           loading={loading}
+//           onPress={submitMeeting}
+//           disabled={loading}
+//           style={styles.submitButton}
+//         >
+//           {editingMeeting
+//             ? editingMeeting.status === "pending"
+//               ? "Update Request (Pending Approval)"
+//               : "Update Meeting"
+//             : "Submit for Approval"}
+//         </Button>
+//       </ScrollView>
+//     </KeyboardAvoidingView>
+//   );
+// }
+
+
+// {/* 
+//   const styles = StyleSheet.create({
+//   container: { padding: 16 },
+//   title: { marginBottom: 12, fontWeight: "700", textAlign: "center" },
+//   row: { flexDirection: "row", justifyContent: "space-between", marginBottom: 12 },
+//   input: { marginBottom: 10 },
+//   submitButton: { marginTop: 12, paddingVertical: 6 },
+// }); */}
+//     const styles = StyleSheet.create({
+//       container: { padding: 16 },
+//       title: { marginBottom: 12, fontWeight: "700", textAlign: "center" },
+//       row: { flexDirection: "row", justifyContent: "space-between", marginBottom: 12 },
+//       input: { marginBottom: 10 },
+//       submitButton: { marginTop: 12, paddingVertical: 6 },
+//       sectionHeader: {
+//         fontSize: 16,
+//         fontWeight: "600",
+//         marginVertical: 10,
+//         color: "#333",
+//       },
+//     });
+
+
+
+
+// import React, { useState, useContext, useEffect } from "react";
+// import {
+//   ScrollView,
+//   Alert,
+//   View,
+//   StyleSheet,
+//   KeyboardAvoidingView,
+//   Platform,
+// } from "react-native";
+// import { TextInput, Button, Text, Menu } from "react-native-paper";
+// import { format } from "date-fns";
+// import { AuthContext } from "../contexts/AuthContext";
+// import CrossPlatformDateTimePicker from "../components/CrossPlatformDateTimePicker";
+// import api from "../api/axiosConfig";
+
+// export default function MeetingFormScreen({ navigation, route }: any) {
+//   const { token, logout, userLocation } = useContext(AuthContext);
+
+//   const editingMeeting = route.params?.meeting || null;
+//   const onSuccess = route.params?.onSuccess || null;
+
+//   const [loading, setLoading] = useState(false);
+
+//   // ---------- FORM STATES ----------
+//   const [clientName, setClientName] = useState(editingMeeting?.client_name || "");
+//   const [personName, setPersonName] = useState(editingMeeting?.contact_person || "");
+//   const [designation, setDesignation] = useState(editingMeeting?.designation || "");
+//   const [email, setEmail] = useState(editingMeeting?.email || "");
+//   const [phone, setPhone] = useState(editingMeeting?.contact_number || "");
+//   const [meetingLocation, setMeetingLocation] = useState(editingMeeting?.location || userLocation || "");
+//   const [place, setPlace] = useState(editingMeeting?.visit_place || "Office");
+//   const [purpose, setPurpose] = useState(editingMeeting?.meeting_purpose || "");
+//   const [discussion, setDiscussion] = useState(editingMeeting?.discussion_summary || "");
+//   const [pathOfTravel, setPathOfTravel] = useState(editingMeeting?.path_of_travel || "Car");
+//   const [distanceKm, setDistanceKm] = useState(editingMeeting?.distance_km?.toString() || "0");
+//   const [expenses, setExpenses] = useState(editingMeeting?.expenses?.toString() || "0");
+//   const [remarks, setRemarks] = useState(editingMeeting?.remarks || "");
+
+//   const [meetingDate, setMeetingDate] = useState<Date>(
+//     editingMeeting ? new Date(editingMeeting.meeting_date) : new Date()
+//   );
+//   const [startTime, setStartTime] = useState<Date>(
+//     editingMeeting?.start_time
+//       ? new Date(`1970-01-01T${editingMeeting.start_time}`)
+//       : new Date()
+//   );
+//   const [endTime, setEndTime] = useState<Date>(
+//     editingMeeting?.end_time
+//       ? new Date(`1970-01-01T${editingMeeting.end_time}`)
+//       : new Date(new Date().getTime() + 30 * 60000)
+//   );
+
+//   const [placeMenuVisible, setPlaceMenuVisible] = useState(false);
+//   const [travelMenuVisible, setTravelMenuVisible] = useState(false);
+
+//   const RATE_PER_KM: Record<string, number> = {
+//     Car: 10,
+//     Bike: 5,
+//     Cab: 15,
+//     "Public Transport": 3,
+//     Walk: 0,
+//   };
+
+//   // ---------- AUTO CALC EXPENSE ----------
+//   useEffect(() => {
+//     if (!editingMeeting || editingMeeting.status !== "completed") {
+//       const km = Number(distanceKm) || 0;
+//       const rate = RATE_PER_KM[pathOfTravel] || 0;
+//       setExpenses((km * rate).toFixed(2));
+//     }
+//   }, [distanceKm, pathOfTravel]);
+
+//   // ---------- LOAD MEETING (EDIT MODE) ----------
+//   useEffect(() => {
+//     if (route.params?.meetingId) {
+//       (async () => {
+//         try {
+//           setLoading(true);
+//           const res = await api.get(`/meetings/${route.params.meetingId}/`, {
+//             headers: { Authorization: `Token ${token}` },
+//           });
+//           const m = res.data;
+//           setClientName(m.client_name || "");
+//           setPersonName(m.contact_person || "");
+//           setDesignation(m.designation || "");
+//           setEmail(m.email || "");
+//           setPhone(m.contact_number || "");
+//           setMeetingLocation(m.location || userLocation || "");
+//           setPlace(m.visit_place || "Office");
+//           setPurpose(m.meeting_purpose || "");
+//           setDiscussion(m.discussion_summary || "");
+//           setPathOfTravel(m.path_of_travel || "Car");
+//           setDistanceKm(m.distance_km?.toString() || "0");
+//           setExpenses(m.expenses?.toString() || "0");
+//           setRemarks(m.remarks || "");
+//           setMeetingDate(m.meeting_date ? new Date(m.meeting_date) : new Date());
+//           setStartTime(m.start_time ? new Date(`1970-01-01T${m.start_time}`) : new Date());
+//           setEndTime(m.end_time ? new Date(`1970-01-01T${m.end_time}`) : new Date(new Date().getTime() + 30 * 60000));
+//         } catch (err) {
+//           Alert.alert("Error", "Failed to load meeting details.");
+//           navigation.goBack();
+//         } finally {
+//           setLoading(false);
+//         }
+//       })();
+//     }
+//   }, [route.params?.meetingId]);
+
+//   // ---------- VALIDATION ----------
+//   const validate = () => {
+//     if (!personName.trim()) return "Person name is required.";
+//     if (!designation.trim()) return "Designation is required.";
+//     if (!phone.trim()) return "Contact number is required.";
+//     if (!purpose.trim()) return "Meeting purpose is required.";
+//     if (!meetingLocation.trim()) return "Meeting location is required.";
+//     if (!email.trim()) return "Email is required.";
+
+//     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+//     if (!emailRegex.test(email)) return "Invalid email format.";
+
+//     const today = new Date();
+//     today.setHours(0, 0, 0, 0);
+//     const meetingDay = new Date(meetingDate);
+//     meetingDay.setHours(0, 0, 0, 0);
+//     if (meetingDay < today) return "Cannot select a past meeting date.";
+//     if (startTime >= endTime) return "Start time must be before end time.";
+
+//     return null;
+//   };
+
+//   // ---------- SUBMIT ----------
+//   const submitMeeting = async () => {
+//     if (loading) return;
+//     const err = validate();
+//     if (err) return Alert.alert("Validation Error", err);
+
+//     setLoading(true);
+
+//     const payload = {
+//       client_name: clientName || null,
+//       contact_person: personName,
+//       designation,
+//       email,
+//       contact_number: phone,
+//       location: meetingLocation,
+//       visit_place: place,
+//       meeting_purpose: purpose,
+//       meeting_date: format(meetingDate, "yyyy-MM-dd"),
+//       start_time: format(startTime, "HH:mm:ss"),
+//       end_time: format(endTime, "HH:mm:ss"),
+//       discussion_summary: discussion,
+//       path_of_travel: pathOfTravel,
+//       distance_km: parseFloat(distanceKm) || 0,
+//       expenses: parseFloat(expenses) || 0,
+//       remarks,
+//     };
+
+//     try {
+//       const headers = {
+//         "Content-Type": "application/json",
+//         Authorization: `Token ${token}`,
+//       };
+
+//       const res = editingMeeting
+//         ? await api.put(`/meetings/${editingMeeting.id}/`, payload, { headers })
+//         : await api.post("/meetings/create/", payload, { headers });
+
+//       Alert.alert("Success", editingMeeting ? "Meeting updated successfully!" : "Meeting created successfully!");
+
+//       // ✅ Notify dashboard and navigate back
+//       if (onSuccess) onSuccess(res.data);
+//       navigation.navigate("Dashboard", { refresh: true });
+
+//       // ✅ Reset form (only for create)
+//       if (!editingMeeting) {
+//         resetForm();
+//       }
+//     } catch (error: any) {
+//       console.log("Submit error:", error.response?.data);
+//       const msg =
+//         error?.response?.data?.detail ||
+//         Object.values(error?.response?.data || {}).flat().join("\n") ||
+//         "Network error";
+//       Alert.alert("Error", msg);
+
+//       if (error.response?.status === 401) {
+//         await logout();
+//         navigation.replace("Login");
+//       }
+//     } finally {
+//       setLoading(false);
+//     }
+//   };
+
+//   const resetForm = () => {
+//     setClientName("");
+//     setPersonName("");
+//     setDesignation("");
+//     setEmail("");
+//     setPhone("");
+//     setMeetingLocation(userLocation || "");
+//     setPlace("Office");
+//     setPurpose("");
+//     setDiscussion("");
+//     setPathOfTravel("Car");
+//     setDistanceKm("0");
+//     setExpenses("0");
+//     setRemarks("");
+//     setMeetingDate(new Date());
+//     setStartTime(new Date());
+//     setEndTime(new Date(new Date().getTime() + 30 * 60000));
+//   };
+
+//   // ---------- RENDER ----------
+//   return (
+//     <KeyboardAvoidingView
+//       style={{ flex: 1, backgroundColor: "#fff" }}
+//       behavior={Platform.OS === "ios" ? "padding" : undefined}
+//     >
+//       <ScrollView style={styles.container} keyboardShouldPersistTaps="handled">
+//         <Text variant="headlineMedium" style={styles.title}>
+//           {editingMeeting ? "Edit Meeting" : "Schedule Meeting"}
+//         </Text>
+
+//         <TextInput
+//           label="User Location (default)"
+//           value={meetingLocation}
+//           onChangeText={setMeetingLocation}
+//           style={styles.input}
+//           right={<TextInput.Icon icon="pencil" />}
+//         />
+
+//         <CrossPlatformDateTimePicker
+//           label="Meeting Date"
+//           value={meetingDate}
+//           onChange={setMeetingDate}
+//           mode="date"
+//         />
+
+//         <View style={styles.row}>
+//           <CrossPlatformDateTimePicker
+//             label="Start Time"
+//             value={startTime}
+//             onChange={setStartTime}
+//             mode="time"
+//           />
+//           <CrossPlatformDateTimePicker
+//             label="End Time"
+//             value={endTime}
+//             onChange={setEndTime}
+//             mode="time"
+//           />
+//         </View>
+
+//         <TextInput
+//           label="Client / Organization"
+//           value={clientName}
+//           onChangeText={setClientName}
+//           style={styles.input}
+//         />
+//         <TextInput
+//           label="Person to meet *"
+//           value={personName}
+//           onChangeText={setPersonName}
+//           style={styles.input}
+//         />
+//         <TextInput
+//           label="Designation *"
+//           value={designation}
+//           onChangeText={setDesignation}
+//           style={styles.input}
+//         />
+//         <TextInput
+//           label="Email ID"
+//           value={email}
+//           onChangeText={setEmail}
+//           keyboardType="email-address"
+//           style={styles.input}
+//         />
+//         <TextInput
+//           label="Contact Number *"
+//           value={phone}
+//           onChangeText={setPhone}
+//           keyboardType="phone-pad"
+//           style={styles.input}
+//         />
+
+//         {/* Visit Place Menu */}
+//         <Menu
+//           visible={placeMenuVisible}
+//           onDismiss={() => setPlaceMenuVisible(false)}
+//           anchor={
+//             <Button mode="outlined" onPress={() => setPlaceMenuVisible(true)} style={styles.input}>
+//               Visit Place: {place}
+//             </Button>
+//           }
+//         >
+//           {["Office", "Client Site", "Other"].map((p) => (
+//             <Menu.Item
+//               key={p}
+//               title={p}
+//               onPress={() => {
+//                 setPlace(p);
+//                 setPlaceMenuVisible(false);
+//               }}
+//             />
+//           ))}
+//         </Menu>
+
+//         <TextInput
+//           label="Meeting Purpose *"
+//           value={purpose}
+//           onChangeText={setPurpose}
+//           style={styles.input}
+//         />
+//         <TextInput
+//           label="Discussion / Outcome"
+//           value={discussion}
+//           onChangeText={setDiscussion}
+//           multiline
+//           style={styles.input}
+//         />
+
+//         {/* Travel Menu */}
+//         <Menu
+//           visible={travelMenuVisible}
+//           onDismiss={() => setTravelMenuVisible(false)}
+//           anchor={
+//             <Button mode="outlined" onPress={() => setTravelMenuVisible(true)} style={styles.input}>
+//               Path of Travel: {pathOfTravel}
+//             </Button>
+//           }
+//         >
+//           {["Car", "Bike", "Cab", "Public Transport", "Walk"].map((t) => (
+//             <Menu.Item
+//               key={t}
+//               title={t}
+//               onPress={() => {
+//                 setPathOfTravel(t);
+//                 setTravelMenuVisible(false);
+//               }}
+//             />
+//           ))}
+//         </Menu>
+
+//         <TextInput
+//           label="Distance (km)"
+//           value={distanceKm}
+//           onChangeText={(v) => setDistanceKm(v.replace(/[^0-9.]/g, ""))}
+//           keyboardType="numeric"
+//           style={styles.input}
+//         />
+//         <TextInput label="Expenses (₹)" value={expenses} editable={false} style={styles.input} />
+//         <TextInput
+//           label="Remarks / Feedback"
+//           value={remarks}
+//           onChangeText={setRemarks}
+//           multiline
+//           style={styles.input}
+//         />
+
+//         <Button
+//           mode="contained"
+//           loading={loading}
+//           onPress={submitMeeting}
+//           disabled={loading}
+//           style={styles.submitButton}
+//         >
+//           {editingMeeting ? "Update Meeting" : "Submit for Approval"}
+//         </Button>
+//       </ScrollView>
+//     </KeyboardAvoidingView>
+//   );
+// }
+
+// const styles = StyleSheet.create({
+//   container: { padding: 16 },
+//   title: { marginBottom: 12, fontWeight: "700", textAlign: "center" },
+//   row: { flexDirection: "row", justifyContent: "space-between", marginBottom: 12 },
+//   input: { marginBottom: 10 },
+//   submitButton: { marginTop: 12, paddingVertical: 6 },
+// });
 
 
 

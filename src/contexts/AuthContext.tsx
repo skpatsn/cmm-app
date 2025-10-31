@@ -1,32 +1,29 @@
 
 
 
+
+
+
 // src/contexts/AuthContext.tsx
 import React, { createContext, useState, useEffect } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { AppState } from "react-native";
+import { refreshAccessToken } from "../services/authService";
 
-// type AuthContextType = {
-//   token: string | null;
-//   role: string | null;
-//   username: string | null;
-//   loading: boolean;
-//   login: (token: string, role: string, username: string) => Promise<void>;
-//   logout: () => Promise<void>;
-// };
 interface AuthContextType {
   token: string | null;
+  refreshToken: string | null;
   username: string | null;
   role: string | null;
-  userLocation: string | null;
-  login: (token: string, role: string, username: string, location: string) => Promise<void>;
+  loading: boolean;
+  login: (token: string, role: string, username: string, refreshToken: string) => Promise<void>;
   logout: () => Promise<void>;
-} 
+}
+
 export const AuthContext = createContext<AuthContextType>({
   token: null,
+  refreshToken: null,
   role: null,
   username: null,
-  userLocation: null,
   loading: true,
   login: async () => {},
   logout: async () => {},
@@ -34,75 +31,299 @@ export const AuthContext = createContext<AuthContextType>({
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [token, setToken] = useState<string | null>(null);
+  const [refreshToken, setRefreshToken] = useState<string | null>(null);
   const [role, setRole] = useState<string | null>(null);
   const [username, setUsername] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Load user from storage
   useEffect(() => {
     const loadUser = async () => {
       try {
         const savedUser = await AsyncStorage.getItem("user");
         if (savedUser) {
           const parsed = JSON.parse(savedUser);
-          if (parsed?.token && parsed.token.trim() !== "") {
+          if (parsed?.token) {
             setToken(parsed.token);
+            setRefreshToken(parsed.refreshToken ?? null);
             setRole(parsed.role ?? null);
             setUsername(parsed.username ?? null);
-          } else {
-            await AsyncStorage.removeItem("user");
           }
         }
       } catch (e) {
         console.error("Failed to load user:", e);
-        await AsyncStorage.removeItem("user");
       } finally {
         setLoading(false);
       }
     };
-
     loadUser();
   }, []);
 
-  // Auto logout on app background/close
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", async (state) => {
-      if (state === "background" || state === "inactive") {
-        await logout();
-      }
-    });
-    return () => subscription.remove();
-  }, [token]);
-
-  const login = async (newToken: string, newRole: string, newUsername: string) => {
-    try {
-      const userData = { token: newToken, role: newRole, username: newUsername };
-      await AsyncStorage.setItem("user", JSON.stringify(userData));
-      setToken(newToken);
-      setRole(newRole);
-      setUsername(newUsername);
-    } catch (error) {
-      console.error("Login persistence error:", error);
-    }
+  const login = async (newToken: string, newRole: string, newUsername: string, newRefreshToken: string) => {
+    const userData = { token: newToken, refreshToken: newRefreshToken, role: newRole, username: newUsername };
+    await AsyncStorage.setItem("user", JSON.stringify(userData));
+    setToken(newToken);
+    setRefreshToken(newRefreshToken);
+    setRole(newRole);
+    setUsername(newUsername);
   };
 
   const logout = async () => {
-    try {
-      await AsyncStorage.removeItem("user");
-      setToken(null);
-      setRole(null);
-      setUsername(null);
-    } catch (error) {
-      console.error("Logout error:", error);
-    }
+    await AsyncStorage.removeItem("user");
+    setToken(null);
+    setRefreshToken(null);
+    setRole(null);
+    setUsername(null);
   };
 
+  // Only render children once loading is done
+  if (loading) return null;
+
   return (
-    <AuthContext.Provider value={{ token, role, username, loading, login, logout }}>
+    <AuthContext.Provider value={{ token, refreshToken, role, username, loading, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
 };
+
+
+
+// // src/contexts/AuthContext.tsx
+// import React, { createContext, useState, useEffect } from "react";
+// import AsyncStorage from "@react-native-async-storage/async-storage";
+// import { AppState } from "react-native";
+// import { refreshAccessToken } from "../services/authService";
+
+// interface AuthContextType {
+//   token: string | null;
+//   refreshToken: string | null;
+//   username: string | null;
+//   role: string | null;
+//   loading: boolean;
+//   login: (token: string, role: string, username: string, refreshToken: string) => Promise<void>;
+//   logout: () => Promise<void>;
+// }
+
+// export const AuthContext = createContext<AuthContextType>({
+//   token: null,
+//   refreshToken: null,
+//   role: null,
+//   username: null,
+//   loading: true,
+//   login: async () => {},
+//   logout: async () => {},
+// });
+
+// export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
+//   const [token, setToken] = useState<string | null>(null);
+//   const [refreshToken, setRefreshToken] = useState<string | null>(null);
+//   const [role, setRole] = useState<string | null>(null);
+//   const [username, setUsername] = useState<string | null>(null);
+//   const [loading, setLoading] = useState(true);
+
+//   // Load user session from storage
+//   useEffect(() => {
+//     const loadUser = async () => {
+//       try {
+//         const savedUser = await AsyncStorage.getItem("user");
+//         if (savedUser) {
+//           const parsed = JSON.parse(savedUser);
+//           if (parsed?.token && parsed.token.trim() !== "") {
+//             setToken(parsed.token);
+//             setRefreshToken(parsed.refreshToken ?? null);
+//             setRole(parsed.role ?? null);
+//             setUsername(parsed.username ?? null);
+//           } else {
+//             await AsyncStorage.removeItem("user");
+//           }
+//         }
+//       } catch (e) {
+//         console.error("Failed to load user:", e);
+//         await AsyncStorage.removeItem("user");
+//       } finally {
+//         setLoading(false);
+//       }
+//     };
+//     loadUser();
+//   }, []);
+
+//   // Auto logout when app goes to background (if you still want this)
+//   // useEffect(() => {
+//   //   const subscription = AppState.addEventListener("change", async (state) => {
+//   //     if (state === "background" || state === "inactive") {
+//   //       await logout();
+//   //     }
+//   //   });
+//   //   return () => subscription.remove();
+//   // }, [token]);
+
+//   // ✅ Updated login method with refresh token support
+//   const login = async (newToken: string, newRole: string, newUsername: string, newRefreshToken: string) => {
+//     try {
+//       const userData = {
+//         token: newToken,
+//         refreshToken: newRefreshToken,
+//         role: newRole,
+//         username: newUsername,
+//       };
+//       await AsyncStorage.setItem("user", JSON.stringify(userData));
+//       setToken(newToken);
+//       setRefreshToken(newRefreshToken);
+//       setRole(newRole);
+//       setUsername(newUsername);
+//     } catch (error) {
+//       console.error("Login persistence error:", error);
+//     }
+//   };
+
+//   // ✅ Auto-refresh example (future-ready)
+//   const refreshTokenIfNeeded = async () => {
+//     if (refreshToken && token) {
+//       const newAccess = await refreshAccessToken(refreshToken);
+//       if (newAccess) {
+//         setToken(newAccess);
+//         await AsyncStorage.mergeItem("user", JSON.stringify({ token: newAccess }));
+//       }
+//     }
+//   };
+
+//   // ✅ Logout method
+//   const logout = async () => {
+//     try {
+//       await AsyncStorage.removeItem("user");
+//       setToken(null);
+//       setRefreshToken(null);
+//       setRole(null);
+//       setUsername(null);
+//     } catch (error) {
+//       console.error("Logout error:", error);
+//     }
+//   };
+
+//   return (
+//     <AuthContext.Provider
+//       value={{
+//         token,
+//         refreshToken,
+//         role,
+//         username,
+//         loading,
+//         login,
+//         logout,
+//       }}
+//     >
+//       {children}
+//     </AuthContext.Provider>
+//   );
+// };
+
+
+
+
+
+
+
+// // src/contexts/AuthContext.tsx
+// import React, { createContext, useState, useEffect } from "react";
+// import AsyncStorage from "@react-native-async-storage/async-storage";
+// import { AppState } from "react-native";
+
+// // type AuthContextType = {
+// //   token: string | null;
+// //   role: string | null;
+// //   username: string | null;
+// //   loading: boolean;
+// //   login: (token: string, role: string, username: string) => Promise<void>;
+// //   logout: () => Promise<void>;
+// // };
+// interface AuthContextType {
+//   token: string | null;
+//   username: string | null;
+//   role: string | null;
+//   userLocation: string | null;
+//   login: (token: string, role: string, username: string, location: string) => Promise<void>;
+//   logout: () => Promise<void>;
+// } 
+// export const AuthContext = createContext<AuthContextType>({
+//   token: null,
+//   role: null,
+//   username: null,
+//   userLocation: null,
+//   loading: true,
+//   login: async () => {},
+//   logout: async () => {},
+// });
+
+// export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
+//   const [token, setToken] = useState<string | null>(null);
+//   const [role, setRole] = useState<string | null>(null);
+//   const [username, setUsername] = useState<string | null>(null);
+//   const [loading, setLoading] = useState(true);
+
+//   // Load user from storage
+//   useEffect(() => {
+//     const loadUser = async () => {
+//       try {
+//         const savedUser = await AsyncStorage.getItem("user");
+//         if (savedUser) {
+//           const parsed = JSON.parse(savedUser);
+//           if (parsed?.token && parsed.token.trim() !== "") {
+//             setToken(parsed.token);
+//             setRole(parsed.role ?? null);
+//             setUsername(parsed.username ?? null);
+//           } else {
+//             await AsyncStorage.removeItem("user");
+//           }
+//         }
+//       } catch (e) {
+//         console.error("Failed to load user:", e);
+//         await AsyncStorage.removeItem("user");
+//       } finally {
+//         setLoading(false);
+//       }
+//     };
+
+//     loadUser();
+//   }, []);
+
+//   // Auto logout on app background/close
+//   useEffect(() => {
+//     const subscription = AppState.addEventListener("change", async (state) => {
+//       if (state === "background" || state === "inactive") {
+//         await logout();
+//       }
+//     });
+//     return () => subscription.remove();
+//   }, [token]);
+
+//   const login = async (newToken: string, newRole: string, newUsername: string) => {
+//     try {
+//       const userData = { token: newToken, role: newRole, username: newUsername };
+//       await AsyncStorage.setItem("user", JSON.stringify(userData));
+//       setToken(newToken);
+//       setRole(newRole);
+//       setUsername(newUsername);
+//     } catch (error) {
+//       console.error("Login persistence error:", error);
+//     }
+//   };
+
+//   const logout = async () => {
+//     try {
+//       await AsyncStorage.removeItem("user");
+//       setToken(null);
+//       setRole(null);
+//       setUsername(null);
+//     } catch (error) {
+//       console.error("Logout error:", error);
+//     }
+//   };
+
+//   return (
+//     <AuthContext.Provider value={{ token, role, username, loading, login, logout }}>
+//       {children}
+//     </AuthContext.Provider>
+//   );
+// };
 
 
 

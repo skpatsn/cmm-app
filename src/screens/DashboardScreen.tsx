@@ -1,50 +1,56 @@
+// // // src/screens/DashboardScreen.tsx
 
-// // src/screens/DashboardScreen.tsx
 
-
-// src/screens/DashboardScreen.tsx
 import React, { useContext, useEffect, useState, useCallback } from 'react';
 import {
-  View,
-  FlatList,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  RefreshControl,
-  Alert
+  View, FlatList, Text, StyleSheet, TouchableOpacity, RefreshControl, Alert
 } from 'react-native';
-import { FAB, Card, Avatar, ActivityIndicator, Button } from 'react-native-paper';
+import { FAB, Card, Avatar, ActivityIndicator, Button, IconButton } from 'react-native-paper';
 import { AuthContext } from '../contexts/AuthContext';
-import { getMeetingsForUser } from '../services/meetingsService';
+import { getMeetingsForUser, getPendingMeetings, approveMeeting } from '../services/meetingsService';
 import { roleQuickLinks } from '../constants/quickLinksConfig';
-import { parseISO, isAfter, isBefore } from 'date-fns';
-import { format } from "date-fns";
+import { parseISO, isAfter, isBefore, format } from 'date-fns';
+import { useNavigation } from '@react-navigation/native';
 
 export default function DashboardScreen({ navigation }: any) {
   const { token, username, role, logout } = useContext(AuthContext);
+
   const [allMeetings, setAllMeetings] = useState<any[]>([]);
   const [meetings, setMeetings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<'ALL' | 'UPCOMING' | 'HISTORY'>('ALL');
 
+  // -------------------------
+  // Fetch Meetings from API
+  // -------------------------
   const fetchMeetings = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     try {
-      const data = await getMeetingsForUser(token);
+      let data = await getMeetingsForUser();
+
+      // Include pending approvals for HO/MGMT
+      if (['HO', 'MGMT'].includes(role?.toUpperCase() || '')) {
+        const pending = await getPendingMeetings();
+        data = [...pending, ...data.filter(m => !pending.find(p => p.id === m.id))];
+      }
+
       setAllMeetings(data);
       applyFilter(data, filter);
-    } catch (err) {
-      console.error(err);
+    } catch (error) {
+      console.error('❌ Error fetching meetings:', error);
+      Alert.alert('Error', 'Unable to fetch meetings. Please try again.');
       setAllMeetings([]);
       setMeetings([]);
-      Alert.alert('Error', 'Failed to fetch meetings. Please try again.');
     } finally {
       setLoading(false);
     }
-  }, [token, filter]);
+  }, [token, role, filter]);
 
+  // -------------------------
+  // Filter Meetings
+  // -------------------------
   const applyFilter = (data: any[], filterType: 'ALL' | 'UPCOMING' | 'HISTORY') => {
     const now = new Date();
     let filtered: any[] = [];
@@ -54,32 +60,46 @@ export default function DashboardScreen({ navigation }: any) {
         filtered = data;
         break;
       case 'UPCOMING':
-        filtered = data.filter((m) => {
-          if (!m.date) return false;
-          const meetingDate = parseISO(m.date);
-          return isAfter(meetingDate, now) && m.status !== 'completed';
-        });
+        filtered = data.filter(
+          m => m.meeting_date && isAfter(parseISO(m.meeting_date), now) && m.status !== 'completed'
+        );
         break;
       case 'HISTORY':
-        filtered = data.filter((m) => {
-          if (!m.date) return m.status === 'completed';
-          const meetingDate = parseISO(m.date);
-          return isBefore(meetingDate, now) || m.status === 'completed';
-        });
+        filtered = data.filter(
+          m => m.meeting_date && (isBefore(parseISO(m.meeting_date), now) || m.status === 'completed')
+        );
         break;
     }
-
     setMeetings(filtered);
   };
 
-  useEffect(() => {
-    applyFilter(allMeetings, filter);
-  }, [filter, allMeetings]);
+  // -------------------------
+  // Navigation
+  // -------------------------
+  const handleCardPress = (item: any) => {
+    if (item.status === 'completed') {
+      Alert.alert('History', 'This meeting is completed and cannot be edited.');
+      return;
+    }
+    navigation.navigate('MeetingForm', { meetingId: item.id, readOnlyDate: true });
+  };
 
-  useEffect(() => {
-    if (!token) return;
-    fetchMeetings();
-  }, [token, fetchMeetings]);
+  const handleApprove = async (meetingId: number) => {
+    try {
+      await approveMeeting(meetingId);
+      Alert.alert('Success', 'Meeting approved!');
+      fetchMeetings();
+    } catch (err) {
+      console.error('❌ Error approving meeting:', err);
+      Alert.alert('Error', 'Failed to approve meeting.');
+    }
+  };
+
+  // -------------------------
+  // Effects
+  // -------------------------
+  useEffect(() => { applyFilter(allMeetings, filter); }, [filter, allMeetings]);
+  useEffect(() => { fetchMeetings(); }, [fetchMeetings]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -87,80 +107,37 @@ export default function DashboardScreen({ navigation }: any) {
     setRefreshing(false);
   };
 
-  const quickLinks = roleQuickLinks[role || 'USER'];
+  const quickLinks = roleQuickLinks[(role ?? 'USER') as string];
 
-  // Handle card press for edit mode
-  const handleCardPress = (item: any) => {
-    if (item.status === 'completed') {
-      Alert.alert('History', 'This meeting is completed and cannot be edited.');
-      return;
-    }
-
-    // Navigate to MeetingForm with pre-filled data, date field disabled
-    navigation.navigate('MeetingForm', { 
-      meetingId: item.id,
-      readOnlyDate: true
-    });
-  };
-
-  const renderMeetingCard = ({ item }: any) => {
-    const meetingDate = item.date
-      ? format(new Date(item.date), "dd MMM yyyy")
-      : "N/A";
-
-    const meetingTime = item.start_time
-      ? format(new Date(`1970-01-01T${item.start_time}`), "HH:mm")
-      : "";
-
-    const initials = item.contact_person
-      ? item.contact_person
-          .split(" ")
-          .map((n: string) => n[0])
-          .join("")
-          .toUpperCase()
-      : "?";
-
-    return (
-      <Card
-        style={styles.card}
-        onPress={() => handleCardPress(item)}
-      >
-        <Card.Title
-          title={`${item.contact_person || "Unknown"} @ ${item.client_name || "Client"}`}
-          subtitle={`Date: ${meetingDate} ${meetingTime} | Status: ${item.status || "Pending"}`}
-          left={(props) => <Avatar.Text {...props} label={initials} />}
-        />
-      </Card>
-    );
-  };
-
+  // -------------------------
+  // Render
+  // -------------------------
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Dashboard — {username || role}</Text>
+      {/* Header Bar */}
+      <View style={styles.headerRow}>
+        <IconButton icon="arrow-left" size={24} onPress={() => navigation.goBack()} />
+        <Text style={styles.title}>Dashboard — {username || role}</Text>
+        <Button onPress={logout} mode="text">Logout</Button>
+      </View>
 
-      <Button mode="outlined" onPress={logout} style={{ marginBottom: 16 }}>
-        Logout
-      </Button>
-
+      {/* Quick Links */}
       <View style={styles.quickLinksContainer}>
-        {quickLinks.map((link) => (
+        {quickLinks.map(link => (
           <TouchableOpacity
             key={link.label}
             style={styles.quickLink}
             onPress={() => navigation.navigate(link.route)}
           >
-            <Avatar.Icon
-              size={36}
-              icon={link.icon}
-              style={{ backgroundColor: '#6200ee', marginBottom: 6 }}
-            />
+            <Avatar.Icon size={36} icon={link.icon} style={{ backgroundColor: '#6200ee', marginBottom: 6 }} />
             <Text style={styles.quickLinkText}>{link.label}</Text>
           </TouchableOpacity>
         ))}
       </View>
 
+      {/* Filters */}
       <View style={styles.filtersContainer}>
-        {['ALL', 'UPCOMING', 'HISTORY'].map((f) => (
+        {['ALL', 'UPCOMING', 'HISTORY'].map(f => (
           <TouchableOpacity
             key={f}
             style={[styles.filterBtn, filter === f && styles.activeFilter]}
@@ -171,6 +148,7 @@ export default function DashboardScreen({ navigation }: any) {
         ))}
       </View>
 
+      {/* Meeting List */}
       {loading ? (
         <ActivityIndicator animating color="#6200ee" size="large" style={{ marginTop: 20 }} />
       ) : meetings.length === 0 ? (
@@ -178,49 +156,953 @@ export default function DashboardScreen({ navigation }: any) {
       ) : (
         <FlatList
           data={meetings}
-          renderItem={renderMeetingCard}
-          keyExtractor={(item) => String(item.id)}
+          renderItem={({ item }) => {
+            const meetingDate = item.meeting_date ? format(parseISO(item.meeting_date), 'dd MMM yyyy') : 'N/A';
+            const meetingTime = item.start_time
+              ? format(new Date(`1970-01-01T${item.start_time}`), 'HH:mm')
+              : '';
+            const initials = item.contact_person
+              ? item.contact_person.split(' ').map((n: string) => n[0]).join('').toUpperCase()
+              : '?';
+
+            return (
+              <Card style={styles.card} onPress={() => handleCardPress(item)}>
+                <Card.Title
+                  title={`${item.contact_person || 'Unknown'} @ ${item.client_name || 'Client'}`}
+                  subtitle={`Date: ${meetingDate} ${meetingTime} | Status: ${item.status || 'Pending'}`}
+                  left={props => <Avatar.Text {...props} label={initials} />}
+                />
+                {['HO', 'MGMT'].includes(role?.toUpperCase() || '') && item.status === 'pending' && (
+                  <Card.Actions>
+                    <Button onPress={() => handleApprove(item.id)}>Approve</Button>
+                  </Card.Actions>
+                )}
+              </Card>
+            );
+          }}
+          keyExtractor={item => String(item.id)}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
           contentContainerStyle={{ paddingBottom: 100 }}
         />
       )}
 
-      <FAB
-        style={styles.fab}
-        icon="plus"
-        label="New Meeting"
-        onPress={() => navigation.navigate('MeetingForm')}
-      />
+      <FAB style={styles.fab} icon="plus" label="New Meeting" onPress={() => navigation.navigate('MeetingForm')} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F3F4F6', padding: 16 },
-  title: { fontSize: 24, fontWeight: '700', marginBottom: 20 },
-  quickLinksContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: 16,
-    justifyContent: 'space-between'
-  },
-  quickLink: {
-    width: '30%',
-    alignItems: 'center',
-    marginVertical: 10,
-    backgroundColor: '#fff',
-    padding: 12,
-    borderRadius: 12,
-    elevation: 3
-  },
-  quickLinkText: { marginTop: 4, fontWeight: '600', textAlign: 'center' },
-  filtersContainer: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 10 },
+  container: { flex: 1, backgroundColor: '#F3F4F6', padding: 12 },
+  headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  title: { fontSize: 20, fontWeight: '700', color: '#222', flex: 1, textAlign: 'center' },
+  quickLinksContainer: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginVertical: 12 },
+  quickLink: { width: '30%', alignItems: 'center', backgroundColor: '#fff', padding: 12, borderRadius: 12, elevation: 2 },
+  quickLinkText: { fontWeight: '600', textAlign: 'center' },
+  filtersContainer: { flexDirection: 'row', justifyContent: 'space-around', marginVertical: 10 },
   filterBtn: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, borderWidth: 1, borderColor: '#6200ee' },
   activeFilter: { backgroundColor: '#6200ee' },
   card: { marginVertical: 6, borderRadius: 12, elevation: 2 },
   emptyText: { textAlign: 'center', marginTop: 20, fontStyle: 'italic', color: '#888' },
   fab: { position: 'absolute', right: 16, bottom: 16 },
 });
+
+
+
+
+
+
+// import React, { useContext, useEffect, useState, useCallback } from 'react';
+// import {
+//   View, FlatList, Text, StyleSheet, TouchableOpacity, RefreshControl, Alert
+// } from 'react-native';
+// import { FAB, Card, Avatar, ActivityIndicator, Button } from 'react-native-paper';
+// import { AuthContext } from '../contexts/AuthContext';
+// import { getMeetingsForUser, getPendingMeetings, approveMeeting } from '../services/meetingsService';
+// import { roleQuickLinks } from '../constants/quickLinksConfig';
+// import { parseISO, isAfter, isBefore } from 'date-fns';
+// import { format } from 'date-fns';
+// import { useNavigation } from "@react-navigation/native";
+// import { IconButton } from "react-native-paper";
+
+
+// export default function DashboardScreen({ navigation }: any) {
+//   const { token, username, role, logout } = useContext(AuthContext);
+
+//   const [allMeetings, setAllMeetings] = useState<any[]>([]);
+//   const [meetings, setMeetings] = useState<any[]>([]);
+//   const [loading, setLoading] = useState(true);
+//   const [refreshing, setRefreshing] = useState(false);
+//   const [filter, setFilter] = useState<'ALL' | 'UPCOMING' | 'HISTORY'>('ALL');
+
+
+
+//   const DashboardScreen = () => {
+//   const navigation = useNavigation();
+//   // -------------------------
+//   // Fetch Meetings from API
+//   // -------------------------
+//   const fetchMeetings = useCallback(async () => {
+//     if (!token) return;
+//     setLoading(true);
+//     try {
+//       let data = await getMeetingsForUser();
+
+//       // Include pending approvals for HO/MGMT
+//       if (["HO", "MGMT"].includes(role?.toUpperCase() || "")) {
+//         const pending = await getPendingMeetings();
+//         data = [...pending, ...data.filter((m) => !pending.find((p) => p.id === m.id))];
+//       }
+
+//       setAllMeetings(data);
+//       applyFilter(data, filter);
+//     } catch (error) {
+//       console.error("❌ Error fetching meetings:", error);
+//       Alert.alert("Error", "Unable to fetch meetings. Please try again.");
+//       setAllMeetings([]);
+//       setMeetings([]);
+//     } finally {
+//       setLoading(false);
+//     }
+//   }, [token, role, filter]);
+
+//   // -------------------------
+//   // Filter Meetings
+//   // -------------------------
+//   const applyFilter = (data: any[], filterType: 'ALL' | 'UPCOMING' | 'HISTORY') => {
+//     const now = new Date();
+//     let filtered: any[] = [];
+
+//     switch (filterType) {
+//       case 'ALL':
+//         filtered = data;
+//         break;
+//       case 'UPCOMING':
+//         filtered = data.filter(m => m.meeting_date && isAfter(parseISO(m.meeting_date), now) && m.status !== 'completed');
+//         break;
+//       case 'HISTORY':
+//         filtered = data.filter(m => m.meeting_date && (isBefore(parseISO(m.meeting_date), now) || m.status === 'completed'));
+//         break;
+//     }
+//     setMeetings(filtered);
+//   };
+
+//   // -------------------------
+//   // Navigation
+//   // -------------------------
+//   const handleCardPress = (item: any) => {
+//     if (item.status === 'completed') {
+//       Alert.alert('History', 'This meeting is completed and cannot be edited.');
+//       return;
+//     }
+//     navigation.navigate('MeetingForm', { meetingId: item.id, readOnlyDate: true });
+//   };
+
+//   const handleApprove = async (meetingId: number) => {
+//     try {
+//       await approveMeeting(meetingId);
+//       Alert.alert('Success', 'Meeting approved!');
+//       fetchMeetings();
+//     } catch (err) {
+//       console.error("❌ Error approving meeting:", err);
+//       Alert.alert('Error', 'Failed to approve meeting.');
+//     }
+//   };
+
+//   // -------------------------
+//   // Render Meeting Card
+//   // -------------------------
+//   const renderMeetingCard = ({ item }: any) => {
+//     const meetingDate = item.meeting_date ? format(parseISO(item.meeting_date), 'dd MMM yyyy') : 'N/A';
+//     const meetingTime = item.start_time ? format(new Date(`1970-01-01T${item.start_time}`), 'HH:mm') : '';
+//     const initials = item.contact_person ? item.contact_person.split(' ').map((n: string) => n[0]).join('').toUpperCase() : '?';
+
+//     return (
+//       <Card style={styles.card} onPress={() => handleCardPress(item)}>
+//         <Card.Title
+//           title={`${item.contact_person || 'Unknown'} @ ${item.client_name || 'Client'}`}
+//           subtitle={`Date: ${meetingDate} ${meetingTime} | Status: ${item.status || 'Pending'}`}
+//           left={props => <Avatar.Text {...props} label={initials} />}
+//         />
+//         {['HO', 'MGMT'].includes(role?.toUpperCase() || '') && item.status === 'pending' && (
+//           <Card.Actions>
+//             <Button onPress={() => handleApprove(item.id)}>Approve</Button>
+//           </Card.Actions>
+//         )}
+//       </Card>
+//     );
+//   };
+
+//   // -------------------------
+//   // Effects
+//   // -------------------------
+//   useEffect(() => { applyFilter(allMeetings, filter); }, [filter, allMeetings]);
+//   useEffect(() => { fetchMeetings(); }, [fetchMeetings]);
+
+//   const onRefresh = async () => {
+//     setRefreshing(true);
+//     await fetchMeetings();
+//     setRefreshing(false);
+//   };
+
+//   const quickLinks = roleQuickLinks[(role ?? 'USER') as string];
+
+//   // -------------------------
+//   // Render
+//   // -------------------------
+//   return (
+//     <View style={styles.container}>
+//       <Text style={styles.title}>Dashboard — {username || role}</Text>
+
+//       <Button mode="outlined" onPress={logout} style={{ marginBottom: 16 }}>Logout</Button>
+
+//       <View style={styles.quickLinksContainer}>
+//         {quickLinks.map(link => (
+//           <TouchableOpacity key={link.label} style={styles.quickLink} onPress={() => navigation.navigate(link.route)}>
+//             <Avatar.Icon size={36} icon={link.icon} style={{ backgroundColor: '#6200ee', marginBottom: 6 }} />
+//             <Text style={styles.quickLinkText}>{link.label}</Text>
+//           </TouchableOpacity>
+//         ))}
+//       </View>
+
+//       <View style={styles.filtersContainer}>
+//         {['ALL', 'UPCOMING', 'HISTORY'].map(f => (
+//           <TouchableOpacity
+//             key={f}
+//             style={[styles.filterBtn, filter === f && styles.activeFilter]}
+//             onPress={() => setFilter(f as any)}
+//           >
+//             <Text style={{ color: filter === f ? '#fff' : '#6200ee', fontWeight: '600' }}>{f}</Text>
+//           </TouchableOpacity>
+//         ))}
+//       </View>
+
+//       {loading ? (
+//         <ActivityIndicator animating color="#6200ee" size="large" style={{ marginTop: 20 }} />
+//       ) : meetings.length === 0 ? (
+//         <Text style={styles.emptyText}>No meetings found.</Text>
+//       ) : (
+//         <FlatList
+//           data={meetings}
+//           renderItem={renderMeetingCard}
+//           keyExtractor={item => String(item.id)}
+//           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+//           contentContainerStyle={{ paddingBottom: 100 }}
+//         />
+//       )}
+
+//       <FAB style={styles.fab} icon="plus" label="New Meeting" onPress={() => navigation.navigate('MeetingForm')} />
+//     </View>
+//   );
+// }
+
+// const styles = StyleSheet.create({
+//   container: { flex: 1, backgroundColor: '#F3F4F6', padding: 16 },
+//   title: { fontSize: 24, fontWeight: '700', marginBottom: 20 },
+//   quickLinksContainer: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 16, justifyContent: 'space-between' },
+//   quickLink: { width: '30%', alignItems: 'center', marginVertical: 10, backgroundColor: '#fff', padding: 12, borderRadius: 12, elevation: 3 },
+//   quickLinkText: { marginTop: 4, fontWeight: '600', textAlign: 'center' },
+//   filtersContainer: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 10 },
+//   filterBtn: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, borderWidth: 1, borderColor: '#6200ee' },
+//   activeFilter: { backgroundColor: '#6200ee' },
+//   card: { marginVertical: 6, borderRadius: 12, elevation: 2 },
+//   emptyText: { textAlign: 'center', marginTop: 20, fontStyle: 'italic', color: '#888' },
+//   fab: { position: 'absolute', right: 16, bottom: 16 },
+// });
+
+
+
+
+
+
+
+
+// import React, { useContext, useEffect, useState, useCallback } from 'react';
+// import {
+//   View, FlatList, Text, StyleSheet, TouchableOpacity, RefreshControl, Alert
+// } from 'react-native';
+// import { FAB, Card, Avatar, ActivityIndicator, Button } from 'react-native-paper';
+// import { AuthContext } from '../contexts/AuthContext';
+// import { getMeetingsForUser, getPendingMeetings, approveMeeting } from '../services/meetingsService';
+// import { roleQuickLinks } from '../constants/quickLinksConfig';
+// import { parseISO, isAfter, isBefore } from 'date-fns';
+// import { format } from 'date-fns';
+ 
+// export default function DashboardScreen({ navigation }: any) {
+//   const { token, username, role, logout } = useContext(AuthContext);
+
+//   const [allMeetings, setAllMeetings] = useState<any[]>([]);
+//   const [meetings, setMeetings] = useState<any[]>([]);
+//   const [loading, setLoading] = useState(true);
+//   const [refreshing, setRefreshing] = useState(false);
+//   const [filter, setFilter] = useState<'ALL' | 'UPCOMING' | 'HISTORY'>('ALL');
+//   // Inside for approval view.
+//   const handleMeetingPress = (meeting: any) => {
+//     navigation.navigate("MeetingApproval", { meetingId: meeting.id });
+//   };
+  
+//   // const fetchMeetings = useCallback(async () => {
+//   //   if (!token) return;
+//   //   setLoading(true);
+//   //   try {
+//   //     let data = await getMeetingsForUser();
+//   //     // If HO/MGMT, include pending approvals
+//   //     if (['HO', 'MGMT'].includes(role)) {
+//   //       const pending = await getPendingMeetings();
+//   //       data = [...pending, ...data.filter(m => !pending.find(p => p.id === m.id))];
+//   //     }
+//   //     setAllMeetings(data);
+//   //     applyFilter(data, filter);
+//   //   } catch (err) {
+//   //     console.error(err);
+//   //     setAllMeetings([]);
+//   //     setMeetings([]);
+//   //     Alert.alert('Error', 'Failed to fetch meetings. Please try again.');
+//   //   } finally {
+//   //     setLoading(false);
+//   //   }
+//   // }, [token, filter, role]);
+//   //  const fetchMeetings = useCallback(async () => {
+//   //    const data = await getPendingMeetings();
+//   //   // const data: Meeting[] = await getPendingMeetings();
+//   //   setMeetings(data); // ✅ correct type now
+//   // }, []);
+  
+
+//   const fetchMeetings = useCallback(async () => {
+//   if (!token) return;
+//   setLoading(true);
+//   try {
+//     let data = await getMeetingsForUser();
+
+//     // Include pending approvals for HO/MGMT
+//     if (["HO", "MGMT"].includes(role?.toUpperCase() || "")) {
+//       const pending = await getPendingMeetings();
+//       data = [...pending, ...data.filter((m) => !pending.find((p) => p.id === m.id))];
+//     }
+
+//     setAllMeetings(data);
+//     applyFilter(data, filter);
+//   } catch (error) {
+//     console.error("❌ Error fetching meetings:", error);
+//     Alert.alert("Error", "Unable to fetch meetings. Please try again.");
+//     setAllMeetings([]);
+//     setMeetings([]);
+//   } finally {
+//     setLoading(false);
+//   }
+// }, [token, role, filter]);
+
+
+// const handleMeetingPress = (meeting: any) => {
+//   navigation.navigate("MeetingApproval", { meetingId: meeting.id });
+// };
+//   const applyFilter = (data: any[], filterType: 'ALL' | 'UPCOMING' | 'HISTORY') => {
+//     const now = new Date();
+//     let filtered: any[] = [];
+
+//     switch (filterType) {
+//       case 'ALL':
+//         filtered = data;
+//         break;
+//       case 'UPCOMING':
+//         filtered = data.filter(m => m.meeting_date && isAfter(parseISO(m.meeting_date), now) && m.status !== 'completed');
+//         break;
+//       case 'HISTORY':
+//         filtered = data.filter(m => m.meeting_date && (isBefore(parseISO(m.meeting_date), now) || m.status === 'completed'));
+//         break;
+//     }
+//     setMeetings(filtered);
+//   };
+
+//   useEffect(() => { applyFilter(allMeetings, filter); }, [filter, allMeetings]);
+//   useEffect(() => { fetchMeetings(); }, [fetchMeetings]);
+
+//   const onRefresh = async () => {
+//     setRefreshing(true);
+//     await fetchMeetings();
+//     setRefreshing(false);
+//   };
+
+//   const quickLinks = roleQuickLinks[(role ?? 'USER') as string];
+//   // const quickLinks = roleQuickLinks[role ?? 'USER'];
+
+//   // const quickLinks = roleQuickLinks[role || 'USER'];
+ 
+//   const handleCardPress = (item: any) => {
+//     if (item.status === 'completed') {
+//       Alert.alert('History', 'This meeting is completed and cannot be edited.');
+//       return;
+//     }
+//     navigation.navigate('MeetingForm', { meetingId: item.id, readOnlyDate: true });
+//   };
+
+//   const handleApprove = async (meetingId: number) => {
+//     try {
+//       await approveMeeting(meetingId);
+//       Alert.alert('Success', 'Meeting approved!');
+//       fetchMeetings();
+//     } catch (err) {
+//       Alert.alert('Error', 'Failed to approve meeting.');
+//     }
+//   };
+
+//   const renderMeetingCard = ({ item }: any) => {
+//     const meetingDate = item.meeting_date ? format(parseISO(item.meeting_date), 'dd MMM yyyy') : 'N/A';
+//     const meetingTime = item.start_time ? format(new Date(`1970-01-01T${item.start_time}`), 'HH:mm') : '';
+//     const initials = item.contact_person ? item.contact_person.split(' ').map((n: string) => n[0]).join('').toUpperCase() : '?';
+
+//     return (
+//       <Card style={styles.card} onPress={() => handleCardPress(item)}>
+//         <Card.Title
+//           title={`${item.contact_person || 'Unknown'} @ ${item.client_name || 'Client'}`}
+//           subtitle={`Date: ${meetingDate} ${meetingTime} | Status: ${item.status || 'Pending'}`}
+//           left={props => <Avatar.Text {...props} label={initials} />}
+//         />
+//         {['HO', 'MGMT'].includes(role) && item.status === 'pending' && (
+//           <Card.Actions>
+//             <Button onPress={() => handleApprove(item.id)}>Approve</Button>
+//           </Card.Actions>
+//         )}
+//       </Card>
+//     );
+//   };
+
+//   return (
+//     <View style={styles.container}>
+//       <Text style={styles.title}>Dashboard — {username || role}</Text>
+
+//       <Button mode="outlined" onPress={logout} style={{ marginBottom: 16 }}>Logout</Button>
+
+//       <View style={styles.quickLinksContainer}>
+//         {quickLinks.map(link => (
+//           <TouchableOpacity key={link.label} style={styles.quickLink} onPress={() => navigation.navigate(link.route)}>
+//             <Avatar.Icon size={36} icon={link.icon} style={{ backgroundColor: '#6200ee', marginBottom: 6 }} />
+//             <Text style={styles.quickLinkText}>{link.label}</Text>
+//           </TouchableOpacity>
+//         ))}
+//       </View>
+
+//       <View style={styles.filtersContainer}>
+//         {['ALL', 'UPCOMING', 'HISTORY'].map(f => (
+//           <TouchableOpacity
+//             key={f}
+//             style={[styles.filterBtn, filter === f && styles.activeFilter]}
+//             onPress={() => setFilter(f as any)}
+//           >
+//             <Text style={{ color: filter === f ? '#fff' : '#6200ee', fontWeight: '600' }}>{f}</Text>
+//           </TouchableOpacity>
+//         ))}
+//       </View>
+
+//       {loading ? (
+//         <ActivityIndicator animating color="#6200ee" size="large" style={{ marginTop: 20 }} />
+//       ) : meetings.length === 0 ? (
+//         <Text style={styles.emptyText}>No meetings found.</Text>
+//       ) : (
+//         <FlatList
+//           data={meetings}
+//           renderItem={renderMeetingCard}
+//           keyExtractor={item => String(item.id)}
+//           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+//           contentContainerStyle={{ paddingBottom: 100 }}
+//         />
+//       )}
+
+//       <FAB style={styles.fab} icon="plus" label="New Meeting" onPress={() => navigation.navigate('MeetingForm')} />
+//     </View>
+//   );
+// }
+
+// const styles = StyleSheet.create({
+//   container: { flex: 1, backgroundColor: '#F3F4F6', padding: 16 },
+//   title: { fontSize: 24, fontWeight: '700', marginBottom: 20 },
+//   quickLinksContainer: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 16, justifyContent: 'space-between' },
+//   quickLink: { width: '30%', alignItems: 'center', marginVertical: 10, backgroundColor: '#fff', padding: 12, borderRadius: 12, elevation: 3 },
+//   quickLinkText: { marginTop: 4, fontWeight: '600', textAlign: 'center' },
+//   filtersContainer: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 10 },
+//   filterBtn: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, borderWidth: 1, borderColor: '#6200ee' },
+//   activeFilter: { backgroundColor: '#6200ee' },
+//   card: { marginVertical: 6, borderRadius: 12, elevation: 2 },
+//   emptyText: { textAlign: 'center', marginTop: 20, fontStyle: 'italic', color: '#888' },
+//   fab: { position: 'absolute', right: 16, bottom: 16 },
+// });
+
+
+
+
+// import React, { useContext, useEffect, useState, useCallback } from 'react';
+// import {
+//   View,
+//   FlatList,
+//   Text,
+//   StyleSheet,
+//   TouchableOpacity,
+//   RefreshControl,
+//   Alert
+// } from 'react-native';
+// import { FAB, Card, Avatar, ActivityIndicator, Button } from 'react-native-paper';
+// import { AuthContext } from '../contexts/AuthContext';
+// import { getMeetingsForUser, approveMeeting } from '../services/meetingsService';
+// import { roleQuickLinks } from '../constants/quickLinksConfig';
+// import { parseISO, isAfter, isBefore } from 'date-fns';
+// import { format } from 'date-fns';
+
+// export default function DashboardScreen({ navigation }: any) {
+//   const { token, username, role, logout } = useContext(AuthContext);
+//   const [allMeetings, setAllMeetings] = useState<any[]>([]);
+//   const [meetings, setMeetings] = useState<any[]>([]);
+//   const [loading, setLoading] = useState(true);
+//   const [refreshing, setRefreshing] = useState(false);
+//   const [filter, setFilter] = useState<'ALL' | 'UPCOMING' | 'HISTORY'>('ALL');
+
+//   const fetchMeetings = useCallback(async () => {
+//     if (!token) return;
+//     setLoading(true);
+//     try {
+//       const data = await getMeetingsForUser();
+//       setAllMeetings(data);
+//       applyFilter(data, filter);
+//     } catch (err) {
+//       console.error(err);
+//       setAllMeetings([]);
+//       setMeetings([]);
+//       Alert.alert('Error', 'Failed to fetch meetings. Please try again.');
+//     } finally {
+//       setLoading(false);
+//     }
+//   }, [token, filter]);
+
+//   const applyFilter = (data: any[], filterType: 'ALL' | 'UPCOMING' | 'HISTORY') => {
+//     const now = new Date();
+//     let filtered: any[] = [];
+
+//     switch (filterType) {
+//       case 'ALL':
+//         filtered = data;
+//         break;
+//       case 'UPCOMING':
+//         filtered = data.filter((m) => {
+//           if (!m.meeting_date) return false;
+//           const meetingDate = parseISO(m.meeting_date);
+//           return isAfter(meetingDate, now) && m.status !== 'completed';
+//         });
+//         break;
+//       case 'HISTORY':
+//         filtered = data.filter((m) => {
+//           if (!m.meeting_date) return m.status === 'completed';
+//           const meetingDate = parseISO(m.meeting_date);
+//           return isBefore(meetingDate, now) || m.status === 'completed';
+//         });
+//         break;
+//     }
+
+//     setMeetings(filtered);
+//   };
+
+//   useEffect(() => {
+//     applyFilter(allMeetings, filter);
+//   }, [filter, allMeetings]);
+
+//   useEffect(() => {
+//     fetchMeetings();
+//   }, [fetchMeetings]);
+
+//   const onRefresh = async () => {
+//     setRefreshing(true);
+//     await fetchMeetings();
+//     setRefreshing(false);
+//   };
+
+//   const quickLinks = roleQuickLinks[role || 'USER'];
+
+//   const handleCardPress = (item: any) => {
+//     if (item.status === 'completed') {
+//       Alert.alert('History', 'This meeting is completed and cannot be edited.');
+//       return;
+//     }
+//     navigation.navigate('MeetingForm', { 
+//       meetingId: item.id,
+//       readOnlyDate: true
+//     });
+//   };
+
+//   const handleApprove = async (meetingId: number) => {
+//     try {
+//       await approveMeeting(meetingId);
+//       Alert.alert('Success', 'Meeting approved!');
+//       fetchMeetings();
+//     } catch (err) {
+//       Alert.alert('Error', 'Failed to approve meeting.');
+//       console.error(err);
+//     }
+//   };
+
+//   const renderMeetingCard = ({ item }: any) => {
+//     const meetingDate = item.meeting_date
+//       ? format(parseISO(item.meeting_date), "dd MMM yyyy")
+//       : "N/A";
+
+//     const meetingTime = item.start_time
+//       ? format(new Date(`1970-01-01T${item.start_time}`), "HH:mm")
+//       : "";
+
+//     const initials = item.contact_person
+//       ? item.contact_person.split(" ").map((n: string) => n[0]).join("").toUpperCase()
+//       : "?";
+
+//     return (
+//       <Card style={styles.card} onPress={() => handleCardPress(item)}>
+//         <Card.Title
+//           title={`${item.contact_person || "Unknown"} @ ${item.client_name || "Client"}`}
+//           subtitle={`Date: ${meetingDate} ${meetingTime} | Status: ${item.status || "Pending"}`}
+//           left={(props) => <Avatar.Text {...props} label={initials} />}
+//         />
+//         {['HO', 'MGMT'].includes(role) && item.status === 'pending' && (
+//           <Card.Actions>
+//             <Button onPress={() => handleApprove(item.id)}>Approve</Button>
+//           </Card.Actions>
+//         )}
+//       </Card>
+//     );
+//   };
+
+//   return (
+//     <View style={styles.container}>
+//       <Text style={styles.title}>Dashboard — {username || role}</Text>
+
+//       <Button mode="outlined" onPress={logout} style={{ marginBottom: 16 }}>
+//         Logout
+//       </Button>
+
+//       <View style={styles.quickLinksContainer}>
+//         {quickLinks.map((link) => (
+//           <TouchableOpacity
+//             key={link.label}
+//             style={styles.quickLink}
+//             onPress={() => navigation.navigate(link.route)}
+//           >
+//             <Avatar.Icon
+//               size={36}
+//               icon={link.icon}
+//               style={{ backgroundColor: '#6200ee', marginBottom: 6 }}
+//             />
+//             <Text style={styles.quickLinkText}>{link.label}</Text>
+//           </TouchableOpacity>
+//         ))}
+//       </View>
+
+//       <View style={styles.filtersContainer}>
+//         {['ALL', 'UPCOMING', 'HISTORY'].map((f) => (
+//           <TouchableOpacity
+//             key={f}
+//             style={[styles.filterBtn, filter === f && styles.activeFilter]}
+//             onPress={() => setFilter(f as any)}
+//           >
+//             <Text style={{ color: filter === f ? '#fff' : '#6200ee', fontWeight: '600' }}>{f}</Text>
+//           </TouchableOpacity>
+//         ))}
+//       </View>
+
+//       {loading ? (
+//         <ActivityIndicator animating color="#6200ee" size="large" style={{ marginTop: 20 }} />
+//       ) : meetings.length === 0 ? (
+//         <Text style={styles.emptyText}>No meetings found.</Text>
+//       ) : (
+//         <FlatList
+//           data={meetings}
+//           renderItem={renderMeetingCard}
+//           keyExtractor={(item) => String(item.id)}
+//           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+//           contentContainerStyle={{ paddingBottom: 100 }}
+//         />
+//       )}
+
+//       <FAB
+//         style={styles.fab}
+//         icon="plus"
+//         label="New Meeting"
+//         onPress={() => navigation.navigate('MeetingForm')}
+//       />
+//     </View>
+//   );
+// }
+
+// const styles = StyleSheet.create({
+//   container: { flex: 1, backgroundColor: '#F3F4F6', padding: 16 },
+//   title: { fontSize: 24, fontWeight: '700', marginBottom: 20 },
+//   quickLinksContainer: {
+//     flexDirection: 'row',
+//     flexWrap: 'wrap',
+//     marginBottom: 16,
+//     justifyContent: 'space-between'
+//   },
+//   quickLink: {
+//     width: '30%',
+//     alignItems: 'center',
+//     marginVertical: 10,
+//     backgroundColor: '#fff',
+//     padding: 12,
+//     borderRadius: 12,
+//     elevation: 3
+//   },
+//   quickLinkText: { marginTop: 4, fontWeight: '600', textAlign: 'center' },
+//   filtersContainer: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 10 },
+//   filterBtn: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, borderWidth: 1, borderColor: '#6200ee' },
+//   activeFilter: { backgroundColor: '#6200ee' },
+//   card: { marginVertical: 6, borderRadius: 12, elevation: 2 },
+//   emptyText: { textAlign: 'center', marginTop: 20, fontStyle: 'italic', color: '#888' },
+//   fab: { position: 'absolute', right: 16, bottom: 16 },
+// });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // // src/screens/DashboardScreen.tsx
+
+
+// // src/screens/DashboardScreen.tsx
+// import React, { useContext, useEffect, useState, useCallback } from 'react';
+// import {
+//   View,
+//   FlatList,
+//   Text,
+//   StyleSheet,
+//   TouchableOpacity,
+//   RefreshControl,
+//   Alert
+// } from 'react-native';
+// import { FAB, Card, Avatar, ActivityIndicator, Button } from 'react-native-paper';
+// import { AuthContext } from '../contexts/AuthContext';
+// import { getMeetingsForUser } from '../services/meetingsService';
+// import { roleQuickLinks } from '../constants/quickLinksConfig';
+// import { parseISO, isAfter, isBefore } from 'date-fns';
+// import { format } from "date-fns";
+
+// export default function DashboardScreen({ navigation }: any) {
+//   const { token, username, role, logout } = useContext(AuthContext);
+//   const [allMeetings, setAllMeetings] = useState<any[]>([]);
+//   const [meetings, setMeetings] = useState<any[]>([]);
+//   const [loading, setLoading] = useState(true);
+//   const [refreshing, setRefreshing] = useState(false);
+//   const [filter, setFilter] = useState<'ALL' | 'UPCOMING' | 'HISTORY'>('ALL');
+
+//   const fetchMeetings = useCallback(async () => {
+//     if (!token) return;
+//     setLoading(true);
+//     try {
+//       const data = await getMeetingsForUser(token);
+//       setAllMeetings(data);
+//       applyFilter(data, filter);
+//     } catch (err) {
+//       console.error(err);
+//       setAllMeetings([]);
+//       setMeetings([]);
+//       Alert.alert('Error', 'Failed to fetch meetings. Please try again.');
+//     } finally {
+//       setLoading(false);
+//     }
+//   }, [token, filter]);
+
+//   const applyFilter = (data: any[], filterType: 'ALL' | 'UPCOMING' | 'HISTORY') => {
+//     const now = new Date();
+//     let filtered: any[] = [];
+
+//     switch (filterType) {
+//       case 'ALL':
+//         filtered = data;
+//         break;
+//       case 'UPCOMING':
+//         filtered = data.filter((m) => {
+//           if (!m.date) return false;
+//           const meetingDate = parseISO(m.date);
+//           return isAfter(meetingDate, now) && m.status !== 'completed';
+//         });
+//         break;
+//       case 'HISTORY':
+//         filtered = data.filter((m) => {
+//           if (!m.date) return m.status === 'completed';
+//           const meetingDate = parseISO(m.date);
+//           return isBefore(meetingDate, now) || m.status === 'completed';
+//         });
+//         break;
+//     }
+
+//     setMeetings(filtered);
+//   };
+
+//   useEffect(() => {
+//     applyFilter(allMeetings, filter);
+//   }, [filter, allMeetings]);
+
+//   useEffect(() => {
+//     if (!token) return;
+//     fetchMeetings();
+//   }, [token, fetchMeetings]);
+
+//   const onRefresh = async () => {
+//     setRefreshing(true);
+//     await fetchMeetings();
+//     setRefreshing(false);
+//   };
+
+//   const quickLinks = roleQuickLinks[role || 'USER'];
+
+//   // Handle card press for edit mode
+//   const handleCardPress = (item: any) => {
+//     if (item.status === 'completed') {
+//       Alert.alert('History', 'This meeting is completed and cannot be edited.');
+//       return;
+//     }
+
+//     // Navigate to MeetingForm with pre-filled data, date field disabled
+//     navigation.navigate('MeetingForm', { 
+//       meetingId: item.id,
+//       readOnlyDate: true
+//     });
+//   };
+
+//   const renderMeetingCard = ({ item }: any) => {
+//     const meetingDate = item.date
+//       ? format(new Date(item.date), "dd MMM yyyy")
+//       : "N/A";
+
+//     const meetingTime = item.start_time
+//       ? format(new Date(`1970-01-01T${item.start_time}`), "HH:mm")
+//       : "";
+
+//     const initials = item.contact_person
+//       ? item.contact_person
+//           .split(" ")
+//           .map((n: string) => n[0])
+//           .join("")
+//           .toUpperCase()
+//       : "?";
+
+//     return (
+//       <Card
+//         style={styles.card}
+//         onPress={() => handleCardPress(item)}
+//       >
+//         <Card.Title
+//           title={`${item.contact_person || "Unknown"} @ ${item.client_name || "Client"}`}
+//           subtitle={`Date: ${meetingDate} ${meetingTime} | Status: ${item.status || "Pending"}`}
+//           left={(props) => <Avatar.Text {...props} label={initials} />}
+//         />
+//       </Card>
+//     );
+//   };
+
+//   return (
+//     <View style={styles.container}>
+//       <Text style={styles.title}>Dashboard — {username || role}</Text>
+
+//       <Button mode="outlined" onPress={logout} style={{ marginBottom: 16 }}>
+//         Logout
+//       </Button>
+
+//       <View style={styles.quickLinksContainer}>
+//         {quickLinks.map((link) => (
+//           <TouchableOpacity
+//             key={link.label}
+//             style={styles.quickLink}
+//             onPress={() => navigation.navigate(link.route)}
+//           >
+//             <Avatar.Icon
+//               size={36}
+//               icon={link.icon}
+//               style={{ backgroundColor: '#6200ee', marginBottom: 6 }}
+//             />
+//             <Text style={styles.quickLinkText}>{link.label}</Text>
+//           </TouchableOpacity>
+//         ))}
+//       </View>
+
+//       <View style={styles.filtersContainer}>
+//         {['ALL', 'UPCOMING', 'HISTORY'].map((f) => (
+//           <TouchableOpacity
+//             key={f}
+//             style={[styles.filterBtn, filter === f && styles.activeFilter]}
+//             onPress={() => setFilter(f as any)}
+//           >
+//             <Text style={{ color: filter === f ? '#fff' : '#6200ee', fontWeight: '600' }}>{f}</Text>
+//           </TouchableOpacity>
+//         ))}
+//       </View>
+
+//       {loading ? (
+//         <ActivityIndicator animating color="#6200ee" size="large" style={{ marginTop: 20 }} />
+//       ) : meetings.length === 0 ? (
+//         <Text style={styles.emptyText}>No meetings found.</Text>
+//       ) : (
+//         <FlatList
+//           data={meetings}
+//           renderItem={renderMeetingCard}
+//           keyExtractor={(item) => String(item.id)}
+//           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+//           contentContainerStyle={{ paddingBottom: 100 }}
+//         />
+//       )}
+
+//       <FAB
+//         style={styles.fab}
+//         icon="plus"
+//         label="New Meeting"
+//         onPress={() => navigation.navigate('MeetingForm')}
+//       />
+//     </View>
+//   );
+// }
+
+// const styles = StyleSheet.create({
+//   container: { flex: 1, backgroundColor: '#F3F4F6', padding: 16 },
+//   title: { fontSize: 24, fontWeight: '700', marginBottom: 20 },
+//   quickLinksContainer: {
+//     flexDirection: 'row',
+//     flexWrap: 'wrap',
+//     marginBottom: 16,
+//     justifyContent: 'space-between'
+//   },
+//   quickLink: {
+//     width: '30%',
+//     alignItems: 'center',
+//     marginVertical: 10,
+//     backgroundColor: '#fff',
+//     padding: 12,
+//     borderRadius: 12,
+//     elevation: 3
+//   },
+//   quickLinkText: { marginTop: 4, fontWeight: '600', textAlign: 'center' },
+//   filtersContainer: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 10 },
+//   filterBtn: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, borderWidth: 1, borderColor: '#6200ee' },
+//   activeFilter: { backgroundColor: '#6200ee' },
+//   card: { marginVertical: 6, borderRadius: 12, elevation: 2 },
+//   emptyText: { textAlign: 'center', marginTop: 20, fontStyle: 'italic', color: '#888' },
+//   fab: { position: 'absolute', right: 16, bottom: 16 },
+// });
 
 
 
